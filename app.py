@@ -21,6 +21,9 @@ from database import (
     listar_parcerias_animal,
 )
 from services.extraction_worker import processar_fila
+from repositories.pessoa_repository import PessoaRepository
+from repositories.financeiro_repository import FinanceiroRepository
+from repositories.estoque_repository import EstoqueRepository
 from utils.campos_abccc import (
     CAMPOS_TECNICOS_EXCLUIR,
     CAMPOS_PRINCIPAL,
@@ -29,6 +32,7 @@ from utils.campos_abccc import (
     CAMPOS_PADREACOES,
     CAMPOS_DESCENDENTES,
     CAMPOS_PEDIGREE_VISIVEIS,
+    montar_pedigree_visivel,
     traduzir_colunas_df,
     traduzir_dict_para_linhas,
 )
@@ -60,6 +64,18 @@ def limpar_vazios(valor):
     if valor in [None, "", "xxxx", "xxx", "nan", "None"]:
         return ""
     return valor
+
+
+def limpar_chaves_session(prefixos):
+    """Remove valores antigos de widgets do session_state.
+
+    No Streamlit, campos de formulário permanecem em memória mesmo após trocar de aba.
+    Esta função força o próximo formulário a abrir limpo.
+    """
+    prefixos = tuple(prefixos)
+    for chave in list(st.session_state.keys()):
+        if str(chave).startswith(prefixos):
+            del st.session_state[chave]
 
 
 def dict_para_dataframe(dados: dict, mapa_rotulos: dict | None = None):
@@ -124,14 +140,790 @@ def card(label, value):
     )
 
 
+def render_modulo_pessoas():
+    st.subheader("Cadastro de Pessoas")
+    st.caption("Base única para clientes, fornecedores, veterinários, ferradores, treinadores, funcionários, parceiros, leiloeiras e transportadores.")
+
+    if st.session_state.get("pessoa_salva_msg"):
+        st.success(st.session_state.pop("pessoa_salva_msg"))
+
+    if "pessoa_form_version" not in st.session_state:
+        st.session_state.pessoa_form_version = 0
+
+    if "pessoa_editando_id" not in st.session_state:
+        st.session_state.pessoa_editando_id = None
+
+    col_busca, col_papel, col_inativos = st.columns([2, 1.4, 1])
+    with col_busca:
+        busca = st.text_input("Buscar pessoa", placeholder="Nome, documento, e-mail ou WhatsApp")
+    with col_papel:
+        papel_filtro = st.selectbox("Filtrar por papel", [""] + PessoaRepository.PAPEIS)
+    with col_inativos:
+        incluir_inativos = st.checkbox("Incluir inativos", value=False)
+
+    pessoas = PessoaRepository.listar(incluir_inativos=incluir_inativos, busca=busca, papel=papel_filtro)
+
+    st.markdown("### Lista de pessoas")
+    if pessoas:
+        for pessoa in pessoas:
+            ativo = bool(pessoa.get("ativo"))
+            status = "Ativo" if ativo else "Inativo"
+            c_nome, c_papeis, c_contato, c_acoes = st.columns([2.3, 2, 2, 1.5])
+            with c_nome:
+                st.write(f"**{pessoa.get('nome_razao')}**")
+                detalhe = pessoa.get("nome_fantasia") or pessoa.get("documento") or ""
+                if detalhe:
+                    st.caption(detalhe)
+            with c_papeis:
+                st.write(pessoa.get("papeis") or "-")
+                st.caption(status)
+            with c_contato:
+                st.write(pessoa.get("whatsapp") or pessoa.get("telefone") or "-")
+                if pessoa.get("email"):
+                    st.caption(pessoa.get("email"))
+            with c_acoes:
+                if st.button("Editar", key=f"editar_pessoa_{pessoa.get('id')}", use_container_width=True):
+                    st.session_state.pessoa_editando_id = pessoa.get("id")
+                    st.rerun()
+                if ativo:
+                    if st.button("Excluir", key=f"excluir_pessoa_{pessoa.get('id')}", use_container_width=True):
+                        PessoaRepository.excluir(pessoa.get("id"))
+                        st.success("Pessoa desativada. O histórico foi preservado.")
+                        st.rerun()
+                else:
+                    if st.button("Reativar", key=f"reativar_pessoa_{pessoa.get('id')}", use_container_width=True):
+                        PessoaRepository.reativar(pessoa.get("id"))
+                        st.success("Pessoa reativada.")
+                        st.rerun()
+            st.divider()
+    else:
+        st.info("Nenhuma pessoa encontrada.")
+
+    st.markdown("### Cadastrar / Editar pessoa")
+    pessoa_atual = None
+    if st.session_state.pessoa_editando_id:
+        pessoa_atual = PessoaRepository.buscar(st.session_state.pessoa_editando_id)
+        if pessoa_atual:
+            st.info(f"Editando: {pessoa_atual.get('nome_razao')}")
+
+    def valor_pessoa(campo, padrao=""):
+        if not pessoa_atual:
+            return padrao
+        return pessoa_atual.get(campo) or padrao
+
+    pessoa_form_version = st.session_state.get("pessoa_form_version", 0)
+    with st.form(f"form_pessoa_{pessoa_form_version}"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            nome_razao = st.text_input("Nome / Razão Social *", value=valor_pessoa("nome_razao"))
+            nome_fantasia = st.text_input("Nome Fantasia / Apelido", value=valor_pessoa("nome_fantasia"))
+            tipo_pessoa = st.selectbox(
+                "Tipo de pessoa",
+                ["", "Pessoa Física", "Pessoa Jurídica"],
+                index=(["", "Pessoa Física", "Pessoa Jurídica"].index(valor_pessoa("tipo_pessoa")) if valor_pessoa("tipo_pessoa") in ["", "Pessoa Física", "Pessoa Jurídica"] else 0),
+            )
+        with c2:
+            tipo_documento = st.selectbox(
+                "Tipo de documento",
+                ["", "CPF", "CNPJ", "Outro"],
+                index=(["", "CPF", "CNPJ", "Outro"].index(valor_pessoa("tipo_documento")) if valor_pessoa("tipo_documento") in ["", "CPF", "CNPJ", "Outro"] else 0),
+            )
+            documento = st.text_input("Documento", value=valor_pessoa("documento"))
+            email = st.text_input("E-mail", value=valor_pessoa("email"))
+        with c3:
+            whatsapp = st.text_input("WhatsApp", value=valor_pessoa("whatsapp"))
+            telefone = st.text_input("Telefone", value=valor_pessoa("telefone"))
+            ativo = st.checkbox("Ativo", value=bool(valor_pessoa("ativo", 1)))
+
+        st.markdown("#### Papéis no sistema")
+        papeis_atuais = pessoa_atual.get("papeis_lista", []) if pessoa_atual else []
+        papeis = st.multiselect(
+            "Esta pessoa pode ser usada como",
+            PessoaRepository.PAPEIS,
+            default=[p for p in papeis_atuais if p in PessoaRepository.PAPEIS],
+        )
+
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            cidade = st.text_input("Cidade", value=valor_pessoa("cidade"))
+            uf = st.text_input("UF", value=valor_pessoa("uf"), max_chars=2)
+        with c5:
+            pix = st.text_input("Chave Pix", value=valor_pessoa("pix"))
+            banco = st.text_input("Banco", value=valor_pessoa("banco"))
+        with c6:
+            agencia = st.text_input("Agência", value=valor_pessoa("agencia"))
+            conta = st.text_input("Conta", value=valor_pessoa("conta"))
+
+        endereco = st.text_area("Endereço", value=valor_pessoa("endereco"))
+        observacoes = st.text_area("Observações", value=valor_pessoa("observacoes"))
+
+        c_salvar, c_novo = st.columns([1, 1])
+        with c_salvar:
+            salvar = st.form_submit_button("Salvar pessoa", type="primary", use_container_width=True)
+        with c_novo:
+            novo = st.form_submit_button("Limpar / Novo cadastro", use_container_width=True)
+
+        if salvar:
+            if not nome_razao.strip():
+                st.warning("Informe o Nome / Razão Social.")
+            else:
+                dados = {
+                    "id": st.session_state.pessoa_editando_id,
+                    "nome_razao": nome_razao.strip(),
+                    "nome_fantasia": nome_fantasia.strip(),
+                    "tipo_pessoa": tipo_pessoa,
+                    "tipo_documento": tipo_documento,
+                    "documento": documento.strip(),
+                    "email": email.strip(),
+                    "whatsapp": whatsapp.strip(),
+                    "telefone": telefone.strip(),
+                    "cidade": cidade.strip(),
+                    "uf": uf.strip().upper(),
+                    "endereco": endereco.strip(),
+                    "pix": pix.strip(),
+                    "banco": banco.strip(),
+                    "agencia": agencia.strip(),
+                    "conta": conta.strip(),
+                    "observacoes": observacoes.strip(),
+                    "ativo": ativo,
+                }
+                pessoa_id = PessoaRepository.salvar(dados, papeis)
+                st.session_state.pessoa_editando_id = None
+                st.session_state.pessoa_form_version = st.session_state.get("pessoa_form_version", 0) + 1
+                st.session_state.pessoa_salva_msg = f"✅ Pessoa cadastrada/atualizada com sucesso."
+                st.rerun()
+
+        if novo:
+            st.session_state.pessoa_editando_id = None
+            st.session_state.pessoa_form_version = st.session_state.get("pessoa_form_version", 0) + 1
+            st.session_state.pessoa_salva_msg = "Formulário limpo para novo cadastro."
+            st.rerun()
+
+
 st.title("ERP Cabanha")
 st.caption("Cadastro inicial de animais com extração automática da ABCCC, banco interno e visualização completa por abas.")
 
-aba_cad, aba_fila, aba_animais = st.tabs(["Cadastrar por SBB", "Fila de Extração", "Cadastro Completo"])
+
+
+def formatar_moeda(valor):
+    try:
+        return f"R$ {float(valor or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "R$ 0,00"
+
+
+def _somar_meses_data_br(data_br, meses):
+    """Soma meses a uma data DD/MM/AAAA sem depender de bibliotecas externas."""
+    from datetime import datetime
+    if not data_br:
+        return ""
+    try:
+        dt = datetime.strptime(data_br, "%d/%m/%Y")
+    except ValueError:
+        return data_br
+    mes = dt.month - 1 + meses
+    ano = dt.year + mes // 12
+    mes = mes % 12 + 1
+    # limita dia ao fim do mês
+    import calendar
+    dia = min(dt.day, calendar.monthrange(ano, mes)[1])
+    return f"{dia:02d}/{mes:02d}/{ano:04d}"
+
+
+def _opcoes_pessoas_financeiro():
+    pessoas = PessoaRepository.listar(incluir_inativos=False)
+    opcoes = {"": (None, "")}
+    for p in pessoas:
+        rotulo = f"{p.get('nome_razao')} | {p.get('papeis') or 'Sem papel'}"
+        opcoes[rotulo] = (p.get("id"), p.get("nome_razao"))
+    return opcoes
+
+
+def _opcoes_animais_financeiro():
+    animais = listar_animais(incluir_inativos=False)
+    opcoes = {"": ""}
+    for a in animais:
+        rotulo = f"{a.get('nome') or 'Sem nome'} | SBB {a.get('sbb')} | {a.get('categoria_idade') or ''} | {a.get('manejo') or ''}"
+        opcoes[rotulo] = a.get("sbb")
+    return opcoes
+
+
+def render_modulo_financeiro():
+    st.subheader("Financeiro Base")
+    st.caption("Lançamentos, parcelas, rateios e relatórios filtráveis. Este é o motor financeiro que será reaproveitado pelos módulos de reprodução, sanidade, estoque e leilões.")
+
+    tab_lancar, tab_relatorios, tab_parcelas = st.tabs(["Novo lançamento", "Relatórios", "Parcelas / Baixa"])
+
+    with tab_lancar:
+        st.markdown("### Novo lançamento financeiro")
+
+        if st.session_state.get("fin_lancamento_salvo_msg"):
+            st.success(st.session_state.pop("fin_lancamento_salvo_msg"))
+
+        pessoas_op = _opcoes_pessoas_financeiro()
+        animais_op = _opcoes_animais_financeiro()
+
+        # Usamos uma chave variável para o formulário.
+        # Quando um lançamento é salvo, incrementamos essa versão e damos st.rerun().
+        # Assim o Streamlit recria o formulário limpo, evitando lançamentos duplicados por dúvida do usuário.
+        fin_form_version = st.session_state.get("fin_form_version", 0)
+
+        criterio_rateio_pre = st.selectbox(
+            "Aplicar custo/receita para",
+            ["Todos os Animais", "Animal específico", "Vários animais", "Categoria", "Manejo"],
+            key=f"fin_criterio_rateio_{fin_form_version}",
+        )
+
+        with st.form(f"form_financeiro_lancamento_{fin_form_version}"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                tipo = st.selectbox("Tipo", ["Saída", "Entrada"])
+                descricao = st.text_input("Descrição / Motivo *", placeholder="Ex: Compra de alfafa, sêmen, vacina, venda de animal...")
+                valor_total = st.number_input("Valor total", min_value=0.0, step=100.0)
+            with c2:
+                data_evento = st.text_input("Data do Evento", placeholder="DD/MM/AAAA")
+                data_competencia = data_evento
+                data_emissao = data_evento
+                forma_pagamento = st.selectbox("Forma de pagamento", FinanceiroRepository.FORMAS_PAGAMENTO)
+            with c3:
+                pessoa_rotulo = st.selectbox("Pessoa relacionada", list(pessoas_op.keys()))
+                pessoa_id, pessoa_nome = pessoas_op[pessoa_rotulo]
+                centro_custo = st.selectbox("Centro de custo", [""] + FinanceiroRepository.CENTROS_CUSTO)
+                atividade = st.selectbox("Atividade", [""] + FinanceiroRepository.ATIVIDADES)
+
+            observacoes = st.text_area("Observações")
+
+            st.markdown("#### Parcelamento")
+            cp1, cp2, cp3 = st.columns(3)
+            with cp1:
+                num_parcelas = st.number_input("Número de parcelas", min_value=1, max_value=120, value=1, step=1)
+            with cp2:
+                primeiro_vencimento = st.text_input("Primeiro vencimento", placeholder="DD/MM/AAAA")
+            with cp3:
+                intervalo_meses = st.number_input("Intervalo em meses", min_value=1, max_value=12, value=1, step=1)
+
+            st.markdown("#### Aplicar custo/receita para")
+            st.caption("Escolha o destino do lançamento. A tela mostra somente os campos necessários para o tipo selecionado.")
+            criterio_rateio = criterio_rateio_pre
+            st.write(f"**Destino escolhido:** {criterio_rateio}")
+
+            rateios = []
+            erro_rateio = ""
+            qtd_destinos = 0
+
+            if criterio_rateio == "Animal específico":
+                animal_rotulo = st.selectbox("Selecionar animal", list(animais_op.keys()))
+                animal_sbb = animais_op.get(animal_rotulo, "")
+                if animal_sbb:
+                    qtd_destinos = 1
+                    rateios = [{"criterio_rateio": criterio_rateio, "animal_sbb": animal_sbb, "percentual": 100, "valor_rateado": valor_total}]
+                else:
+                    erro_rateio = "Selecione um animal para o rateio."
+
+            elif criterio_rateio == "Vários animais":
+                opcoes_animais_validas = [k for k in animais_op.keys() if k]
+                animais_selecionados = st.multiselect("Selecionar animais que participam do rateio", opcoes_animais_validas)
+                qtd = len(animais_selecionados)
+                qtd_destinos = qtd
+                if qtd:
+                    for rotulo in animais_selecionados:
+                        rateios.append({
+                            "criterio_rateio": criterio_rateio,
+                            "animal_sbb": animais_op[rotulo],
+                            "percentual": 100 / qtd,
+                            "valor_rateado": valor_total / qtd if qtd else 0,
+                        })
+                else:
+                    erro_rateio = "Selecione pelo menos um animal para o rateio."
+
+            elif criterio_rateio == "Categoria":
+                categoria_animal = st.text_input("Categoria animal", placeholder="Ex: Égua Adulta, Macho Adulto Inteiro, Potro Desmamado...")
+                qtd_destinos = 1
+                rateios = [{"criterio_rateio": criterio_rateio, "categoria_animal": categoria_animal, "percentual": 100, "valor_rateado": valor_total}]
+                if not categoria_animal.strip():
+                    erro_rateio = "Informe a categoria do rateio."
+
+            elif criterio_rateio == "Manejo":
+                manejo = st.text_input("Manejo", placeholder="Ex: Cabanha, Pastagem, Campo com suplementação...")
+                qtd_destinos = 1
+                rateios = [{"criterio_rateio": criterio_rateio, "manejo": manejo, "percentual": 100, "valor_rateado": valor_total}]
+                if not manejo.strip():
+                    erro_rateio = "Informe o manejo do rateio."
+
+            else:
+                qtd_destinos = len([v for v in animais_op.values() if v])
+                rateios = [{"criterio_rateio": "Todos os Animais", "percentual": 100, "valor_rateado": valor_total}]
+
+            if qtd_destinos:
+                st.info(f"Destino selecionado: {criterio_rateio}. Quantidade de destino(s): {qtd_destinos}.")
+
+            salvar = st.form_submit_button("Salvar lançamento", type="primary", use_container_width=True)
+            if salvar:
+                if not descricao.strip() or valor_total <= 0:
+                    st.warning("Informe descrição e valor total maior que zero.")
+                elif erro_rateio:
+                    st.warning(erro_rateio)
+                else:
+                    valor_parcela = valor_total / int(num_parcelas)
+                    parcelas = []
+                    base_venc = primeiro_vencimento or data_evento
+                    for i in range(int(num_parcelas)):
+                        parcelas.append({
+                            "numero_parcela": i + 1,
+                            "data_vencimento": _somar_meses_data_br(base_venc, i * int(intervalo_meses)),
+                            "valor_previsto": valor_parcela,
+                            "status": "Aberta",
+                        })
+                    dados = {
+                        "tipo": tipo,
+                        "descricao": descricao.strip(),
+                        "data_competencia": data_evento.strip(),
+                        "data_emissao": data_evento.strip(),
+                        "valor_total": valor_total,
+                        "pessoa_id": pessoa_id,
+                        "pessoa_nome": pessoa_nome,
+                        "centro_custo": centro_custo,
+                        "atividade": atividade,
+                        "origem_modulo": "Manual",
+                        "forma_pagamento": forma_pagamento,
+                        "observacoes": observacoes.strip(),
+                    }
+                    lancamento_id = FinanceiroRepository.salvar_lancamento(dados, parcelas, rateios)
+                    st.session_state["fin_lancamento_salvo_msg"] = (
+                        f"✅ Lançamento financeiro #{lancamento_id} cadastrado com sucesso. "
+                        f"Foram geradas {len(parcelas)} parcela(s) e {len(rateios)} rateio(s). "
+                        "O formulário foi limpo para um novo cadastro."
+                    )
+                    st.session_state["fin_form_version"] = st.session_state.get("fin_form_version", 0) + 1
+                    st.rerun()
+
+    with tab_relatorios:
+        st.markdown("### Relatórios financeiros")
+        st.caption("Nesta primeira versão já filtramos por variáveis principais. Nas próximas versões vamos acrescentar relatórios por animal, categoria, manejo, produto, safra/ciclo e DRE.")
+
+        cf1, cf2, cf3, cf4 = st.columns(4)
+        with cf1:
+            f_tipo = st.selectbox("Tipo", [""] + ["Entrada", "Saída"], key="fin_f_tipo")
+            f_data_inicio = st.text_input("Data inicial", placeholder="DD/MM/AAAA", key="fin_f_ini")
+        with cf2:
+            f_centro = st.selectbox("Centro de custo", [""] + FinanceiroRepository.CENTROS_CUSTO, key="fin_f_centro")
+            f_data_fim = st.text_input("Data final", placeholder="DD/MM/AAAA", key="fin_f_fim")
+        with cf3:
+            f_atividade = st.selectbox("Atividade", [""] + FinanceiroRepository.ATIVIDADES, key="fin_f_atividade")
+            f_status_parcela = st.selectbox("Status parcela", [""] + FinanceiroRepository.STATUS_PARCELA, key="fin_f_status")
+        with cf4:
+            f_busca = st.text_input("Buscar", placeholder="Descrição, pessoa ou observação", key="fin_f_busca")
+
+        filtros = {
+            "tipo": f_tipo,
+            "centro_custo": f_centro,
+            "atividade": f_atividade,
+            "status_parcela": f_status_parcela,
+            "data_inicio": f_data_inicio.strip(),
+            "data_fim": f_data_fim.strip(),
+            "busca": f_busca.strip(),
+        }
+        filtros = {k: v for k, v in filtros.items() if v}
+
+        ind = FinanceiroRepository.indicadores(filtros)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Entradas previstas", formatar_moeda(ind["entradas_previstas"]))
+        m2.metric("Saídas previstas", formatar_moeda(ind["saidas_previstas"]))
+        m3.metric("Saldo previsto", formatar_moeda(ind["saldo_previsto"]))
+        m4.metric("Saldo realizado", formatar_moeda(ind["saldo_realizado"]))
+        m5, m6, m7, m8 = st.columns(4)
+        m5.metric("Recebido", formatar_moeda(ind["recebido"]))
+        m6.metric("Pago", formatar_moeda(ind["pago"]))
+        m7.metric("A receber", formatar_moeda(ind["aberto_receber"]))
+        m8.metric("A pagar", formatar_moeda(ind["aberto_pagar"]))
+
+        st.markdown("#### Lançamentos")
+        lancamentos = FinanceiroRepository.listar_lancamentos(filtros)
+        mostrar_df(pd.DataFrame(lancamentos), "Nenhum lançamento encontrado.")
+
+        st.markdown("#### Parcelas")
+        parcelas = FinanceiroRepository.listar_parcelas(filtros=filtros)
+        mostrar_df(pd.DataFrame(parcelas), "Nenhuma parcela encontrada.")
+
+        if lancamentos:
+            ids = [str(l["id"]) for l in lancamentos]
+            id_sel = st.selectbox("Ver rateios do lançamento", [""] + ids)
+            if id_sel:
+                lancamento_id_sel = int(id_sel)
+                rateios = FinanceiroRepository.listar_rateios(lancamento_id_sel)
+                mostrar_df(pd.DataFrame(rateios), "Sem rateios.")
+
+                lanc_atual = FinanceiroRepository.buscar_lancamento(lancamento_id_sel)
+                parcelas_atual = FinanceiroRepository.listar_parcelas(lancamento_id=lancamento_id_sel)
+
+                with st.expander("Editar lançamento selecionado", expanded=False):
+                    st.warning("Use a edição apenas para corrigir erro de digitação, valor, parcelamento ou rateio. Se o lançamento já teve baixa real, confira antes de alterar.")
+                    pessoas_op_edit = _opcoes_pessoas_financeiro()
+                    animais_op_edit = _opcoes_animais_financeiro()
+                    labels_pessoas = list(pessoas_op_edit.keys())
+                    pessoa_index = 0
+                    for idx, label in enumerate(labels_pessoas):
+                        pid, _pnome = pessoas_op_edit[label]
+                        if lanc_atual and pid == lanc_atual.get("pessoa_id"):
+                            pessoa_index = idx
+                            break
+
+                    criterio_atual_pre = rateios[0].get("Critério") if rateios else "Todos os Animais"
+                    if criterio_atual_pre == "Global":
+                        criterio_atual_pre = "Todos os Animais"
+                    criterios_pre = ["Todos os Animais", "Animal específico", "Vários animais", "Categoria", "Manejo"]
+                    e_criterio_rateio_pre = st.selectbox(
+                        "Aplicar custo/receita para",
+                        criterios_pre,
+                        index=criterios_pre.index(criterio_atual_pre) if criterio_atual_pre in criterios_pre else 0,
+                        key=f"e_crit_pre_{lancamento_id_sel}",
+                    )
+
+                    with st.form(f"form_editar_lancamento_{lancamento_id_sel}"):
+                        ec1, ec2, ec3 = st.columns(3)
+                        with ec1:
+                            e_tipo = st.selectbox("Tipo", ["Saída", "Entrada"], index=0 if (lanc_atual or {}).get("tipo") != "Entrada" else 1, key=f"e_tipo_{lancamento_id_sel}")
+                            e_descricao = st.text_input("Descrição / Motivo *", value=(lanc_atual or {}).get("descricao") or "", key=f"e_desc_{lancamento_id_sel}")
+                            e_valor_total = st.number_input("Valor total", min_value=0.0, step=100.0, value=float((lanc_atual or {}).get("valor_total") or 0), key=f"e_valor_{lancamento_id_sel}")
+                        with ec2:
+                            data_evento_atual = (lanc_atual or {}).get("data_competencia") or (lanc_atual or {}).get("data_emissao") or ""
+                            e_data_evento = st.text_input("Data do Evento", value=data_evento_atual, placeholder="DD/MM/AAAA", key=f"e_evento_{lancamento_id_sel}")
+                            e_data_competencia = e_data_evento
+                            e_data_emissao = e_data_evento
+                            forma_atual = (lanc_atual or {}).get("forma_pagamento") or ""
+                            formas = FinanceiroRepository.FORMAS_PAGAMENTO
+                            e_forma_pagamento = st.selectbox("Forma de pagamento", formas, index=formas.index(forma_atual) if forma_atual in formas else 0, key=f"e_forma_{lancamento_id_sel}")
+                        with ec3:
+                            e_pessoa_rotulo = st.selectbox("Pessoa relacionada", labels_pessoas, index=pessoa_index, key=f"e_pessoa_{lancamento_id_sel}")
+                            e_pessoa_id, e_pessoa_nome = pessoas_op_edit[e_pessoa_rotulo]
+                            centro_atual = (lanc_atual or {}).get("centro_custo") or ""
+                            centros = [""] + FinanceiroRepository.CENTROS_CUSTO
+                            e_centro_custo = st.selectbox("Centro de custo", centros, index=centros.index(centro_atual) if centro_atual in centros else 0, key=f"e_centro_{lancamento_id_sel}")
+                            atividade_atual = (lanc_atual or {}).get("atividade") or ""
+                            atividades = [""] + FinanceiroRepository.ATIVIDADES
+                            e_atividade = st.selectbox("Atividade", atividades, index=atividades.index(atividade_atual) if atividade_atual in atividades else 0, key=f"e_ativ_{lancamento_id_sel}")
+
+                        e_observacoes = st.text_area("Observações", value=(lanc_atual or {}).get("observacoes") or "", key=f"e_obs_{lancamento_id_sel}")
+
+                        st.markdown("#### Parcelamento corrigido")
+                        ep1, ep2, ep3 = st.columns(3)
+                        with ep1:
+                            e_num_parcelas = st.number_input("Número de parcelas", min_value=1, max_value=120, value=max(1, len(parcelas_atual) or 1), step=1, key=f"e_nparc_{lancamento_id_sel}")
+                        with ep2:
+                            venc_padrao = parcelas_atual[0].get("Vencimento") if parcelas_atual else ((lanc_atual or {}).get("data_competencia") or "")
+                            e_primeiro_vencimento = st.text_input("Primeiro vencimento", value=venc_padrao or "", placeholder="DD/MM/AAAA", key=f"e_venc_{lancamento_id_sel}")
+                        with ep3:
+                            e_intervalo_meses = st.number_input("Intervalo em meses", min_value=1, max_value=12, value=1, step=1, key=f"e_intervalo_{lancamento_id_sel}")
+
+                        st.markdown("#### Rateio corrigido")
+                        e_criterio_rateio = e_criterio_rateio_pre
+                        st.write(f"**Destino escolhido:** {e_criterio_rateio}")
+                        e_rateios = []
+                        if e_criterio_rateio == "Animal específico":
+                            animal_atual = rateios[0].get("Animal") if rateios else ""
+                            labels_animais = list(animais_op_edit.keys())
+                            animal_index = 0
+                            for idx, label in enumerate(labels_animais):
+                                if animais_op_edit[label] == animal_atual:
+                                    animal_index = idx
+                                    break
+                            e_animal_rotulo = st.selectbox("Animal", labels_animais, index=animal_index, key=f"e_animal_{lancamento_id_sel}")
+                            e_rateios = [{"criterio_rateio": e_criterio_rateio, "animal_sbb": animais_op_edit[e_animal_rotulo], "percentual": 100, "valor_rateado": e_valor_total}]
+                        elif e_criterio_rateio == "Vários animais":
+                            animais_atuais = [r.get("Animal") for r in rateios if r.get("Animal")]
+                            opcoes_animais_validas = [k for k in animais_op_edit.keys() if k]
+                            default_multi = [k for k in opcoes_animais_validas if animais_op_edit[k] in animais_atuais]
+                            e_animais_selecionados = st.multiselect("Animais que participam do rateio", opcoes_animais_validas, default=default_multi, key=f"e_multi_{lancamento_id_sel}")
+                            qtd = len(e_animais_selecionados)
+                            if qtd:
+                                for rotulo in e_animais_selecionados:
+                                    e_rateios.append({"criterio_rateio": e_criterio_rateio, "animal_sbb": animais_op_edit[rotulo], "percentual": 100 / qtd, "valor_rateado": e_valor_total / qtd})
+                        elif e_criterio_rateio == "Categoria":
+                            categoria_atual = rateios[0].get("Categoria") if rateios else ""
+                            e_categoria_animal = st.text_input("Categoria animal", value=categoria_atual or "", key=f"e_categoria_{lancamento_id_sel}")
+                            e_rateios = [{"criterio_rateio": e_criterio_rateio, "categoria_animal": e_categoria_animal, "percentual": 100, "valor_rateado": e_valor_total}]
+                        elif e_criterio_rateio == "Manejo":
+                            manejo_atual = rateios[0].get("Manejo") if rateios else ""
+                            e_manejo = st.text_input("Manejo", value=manejo_atual or "", key=f"e_manejo_{lancamento_id_sel}")
+                            e_rateios = [{"criterio_rateio": e_criterio_rateio, "manejo": e_manejo, "percentual": 100, "valor_rateado": e_valor_total}]
+                        else:
+                            e_rateios = [{"criterio_rateio": "Todos os Animais", "percentual": 100, "valor_rateado": e_valor_total}]
+
+                        col_salvar, col_cancelar = st.columns(2)
+                        with col_salvar:
+                            editar = st.form_submit_button("Salvar alterações", type="primary", use_container_width=True)
+                        with col_cancelar:
+                            st.form_submit_button("Cancelar", use_container_width=True)
+
+                        if editar:
+                            if not e_descricao.strip() or e_valor_total <= 0:
+                                st.warning("Informe descrição e valor total maior que zero.")
+                            else:
+                                valor_parcela = e_valor_total / int(e_num_parcelas)
+                                e_parcelas = []
+                                base_venc = e_primeiro_vencimento or e_data_evento
+                                for i in range(int(e_num_parcelas)):
+                                    e_parcelas.append({
+                                        "numero_parcela": i + 1,
+                                        "data_vencimento": _somar_meses_data_br(base_venc, i * int(e_intervalo_meses)),
+                                        "valor_previsto": valor_parcela,
+                                        "status": "Aberta",
+                                    })
+                                e_dados = {
+                                    "tipo": e_tipo,
+                                    "descricao": e_descricao.strip(),
+                                    "data_competencia": e_data_evento.strip(),
+                                    "data_emissao": e_data_evento.strip(),
+                                    "valor_total": e_valor_total,
+                                    "pessoa_id": e_pessoa_id,
+                                    "pessoa_nome": e_pessoa_nome,
+                                    "centro_custo": e_centro_custo,
+                                    "atividade": e_atividade,
+                                    "origem_modulo": (lanc_atual or {}).get("origem_modulo") or "Manual",
+                                    "forma_pagamento": e_forma_pagamento,
+                                    "observacoes": e_observacoes.strip(),
+                                }
+                                FinanceiroRepository.atualizar_lancamento(lancamento_id_sel, e_dados, e_parcelas, e_rateios)
+                                st.success(f"Lançamento #{lancamento_id_sel} atualizado com sucesso.")
+                                st.rerun()
+
+                st.divider()
+                st.markdown("#### Excluir duplicidade ou lançamento errado")
+                st.caption("A exclusão é lógica: o lançamento sai dos relatórios operacionais, mas o registro fica preservado no banco para rastreabilidade.")
+                confirmar_exclusao = st.checkbox(f"Confirmo que desejo excluir o lançamento #{lancamento_id_sel}", key=f"conf_excluir_lanc_{lancamento_id_sel}")
+                if st.button("Excluir lançamento selecionado", type="secondary", disabled=not confirmar_exclusao):
+                    FinanceiroRepository.excluir_lancamento(lancamento_id_sel)
+                    st.success("Lançamento excluído logicamente. Ele não aparecerá mais nos relatórios operacionais.")
+                    st.rerun()
+
+    with tab_parcelas:
+        st.markdown("### Parcelas em aberto / baixa")
+        parcelas = FinanceiroRepository.listar_parcelas(filtros={"status_parcela": "Aberta"})
+        if not parcelas:
+            st.info("Nenhuma parcela em aberto.")
+        else:
+            for p in parcelas:
+                c1, c2, c3, c4, c5 = st.columns([1.1, 2.8, 1.2, 1.2, 1.2])
+                with c1:
+                    st.write(f"#{p.get('id')}")
+                    st.caption(f"Lanç. {p.get('Lançamento')}")
+                with c2:
+                    st.write(f"**{p.get('Descrição')}**")
+                    st.caption(f"{p.get('Pessoa') or '-'} | {p.get('Centro de Custo') or '-'} | {p.get('Atividade') or '-'}")
+                with c3:
+                    st.write(p.get("Vencimento") or "-")
+                    st.caption(p.get("Tipo") or "")
+                with c4:
+                    st.write(formatar_moeda(p.get("Valor Previsto")))
+                with c5:
+                    data_pgto = st.text_input("Data baixa", value="", placeholder="DD/MM/AAAA", key=f"data_pgto_{p.get('id')}")
+                    if st.button("Baixar", key=f"baixar_parcela_{p.get('id')}", use_container_width=True):
+                        FinanceiroRepository.pagar_parcela(p.get("id"), data_pgto or p.get("Vencimento"), p.get("Valor Previsto"))
+                        st.success("Parcela baixada.")
+                        st.rerun()
+                st.divider()
+
+
+
+
+
+def _opcoes_produtos_estoque():
+    produtos = EstoqueRepository.listar_produtos(incluir_inativos=False)
+    opcoes = {"": None}
+    for p in produtos:
+        rotulo = f"{p.get('Produto')} | {p.get('Categoria') or ''} | {p.get('Unidade') or ''}"
+        opcoes[rotulo] = p.get("id")
+    return opcoes
+
+
+def render_modulo_estoque():
+    st.subheader("Estoque")
+    st.caption("Cadastro de insumos, medicamentos, rações, suplementos, sêmen/palhetas e controle de entradas/consumos. Esta base será reaproveitada por sanidade, reprodução, leilões e manejo.")
+
+    tab_produtos, tab_mov, tab_saldos = st.tabs(["Produtos / Insumos", "Movimentações", "Saldos e alertas"])
+
+    with tab_produtos:
+        st.markdown("### Cadastro de produto/insumo")
+        if st.session_state.get("estoque_produto_msg"):
+            st.success(st.session_state.pop("estoque_produto_msg"))
+
+        versao = st.session_state.get("estoque_produto_form_version", 0)
+        produtos_lista = EstoqueRepository.listar_produtos(incluir_inativos=True)
+        ids = [""] + [str(p.get("id")) for p in produtos_lista]
+        id_editar = st.selectbox("Editar produto existente", ids, key=f"estoque_produto_editar_{versao}")
+        atual = EstoqueRepository.buscar_produto(int(id_editar)) if id_editar else {}
+
+        with st.form(f"form_estoque_produto_{versao}"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                nome = st.text_input("Nome do produto *", value=atual.get("nome", ""), placeholder="Ex: Ração Potros, Ivomec, Vacina Raiva")
+                categoria = st.selectbox(
+                    "Categoria",
+                    [""] + EstoqueRepository.CATEGORIAS,
+                    index=([""] + EstoqueRepository.CATEGORIAS).index(atual.get("categoria", "")) if atual.get("categoria", "") in ([""] + EstoqueRepository.CATEGORIAS) else 0,
+                )
+                unidade = st.selectbox(
+                    "Unidade",
+                    [""] + EstoqueRepository.UNIDADES,
+                    index=([""] + EstoqueRepository.UNIDADES).index(atual.get("unidade", "")) if atual.get("unidade", "") in ([""] + EstoqueRepository.UNIDADES) else 0,
+                )
+            with c2:
+                apresentacao = st.text_input("Apresentação", value=atual.get("apresentacao", ""), placeholder="Ex: Saco 40kg, frasco 50mL")
+                laboratorio = st.text_input("Laboratório/Fabricante", value=atual.get("laboratorio_fabricante", ""))
+                vencimento = st.text_input("Data de vencimento", value=atual.get("data_vencimento", ""), placeholder="DD/MM/AAAA")
+            with c3:
+                estoque_minimo = st.number_input("Estoque mínimo", min_value=0.0, step=1.0, value=float(atual.get("estoque_minimo") or 0))
+                valor_unitario = st.number_input("Valor unitário padrão", min_value=0.0, step=1.0, value=float(atual.get("valor_unitario") or 0))
+                ativo = st.checkbox("Ativo", value=bool(atual.get("ativo", 1)))
+
+            observacoes = st.text_area("Observações", value=atual.get("observacoes", ""))
+            col_a, col_b = st.columns(2)
+            salvar = col_a.form_submit_button("Salvar produto", type="primary", use_container_width=True)
+            limpar = col_b.form_submit_button("Limpar / Novo produto", use_container_width=True)
+
+            if salvar:
+                if not nome.strip():
+                    st.warning("Informe o nome do produto.")
+                else:
+                    produto_id = EstoqueRepository.salvar_produto({
+                        "id": int(id_editar) if id_editar else None,
+                        "nome": nome,
+                        "categoria": categoria,
+                        "apresentacao": apresentacao,
+                        "laboratorio_fabricante": laboratorio,
+                        "unidade": unidade,
+                        "estoque_minimo": estoque_minimo,
+                        "valor_unitario": valor_unitario,
+                        "data_vencimento": vencimento,
+                        "observacoes": observacoes,
+                        "ativo": 1 if ativo else 0,
+                    })
+                    st.session_state["estoque_produto_msg"] = f"✅ Produto #{produto_id} salvo com sucesso. O formulário foi limpo."
+                    st.session_state["estoque_produto_form_version"] = versao + 1
+                    st.rerun()
+            if limpar:
+                st.session_state["estoque_produto_form_version"] = versao + 1
+                st.session_state["estoque_produto_msg"] = "Formulário limpo para novo produto."
+                st.rerun()
+
+        st.markdown("### Produtos cadastrados")
+        f1, f2, f3 = st.columns(3)
+        busca = f1.text_input("Buscar produto", key="estoque_busca_produto")
+        cat = f2.selectbox("Categoria", [""] + EstoqueRepository.CATEGORIAS, key="estoque_cat_produto")
+        incluir = f3.checkbox("Mostrar inativos", key="estoque_prod_inativos")
+        df_prod = pd.DataFrame(EstoqueRepository.listar_produtos(incluir_inativos=incluir, busca=busca, categoria=cat))
+        st.dataframe(df_prod, use_container_width=True, hide_index=True)
+        if not df_prod.empty:
+            excluir_id = st.selectbox("Excluir produto", [""] + [str(x) for x in df_prod["id"].tolist()], key="estoque_excluir_produto")
+            if excluir_id and st.button("Confirmar exclusão do produto", type="secondary"):
+                EstoqueRepository.excluir_produto(int(excluir_id))
+                st.success("Produto inativado com sucesso.")
+                st.rerun()
+
+    with tab_mov:
+        st.markdown("### Nova movimentação de estoque")
+        if st.session_state.get("estoque_mov_msg"):
+            st.success(st.session_state.pop("estoque_mov_msg"))
+
+        produtos_op = _opcoes_produtos_estoque()
+        pessoas_op = _opcoes_pessoas_financeiro()
+        animais_op = _opcoes_animais_financeiro()
+        versao_mov = st.session_state.get("estoque_mov_form_version", 0)
+
+        with st.form(f"form_estoque_mov_{versao_mov}"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                produto_rotulo = st.selectbox("Produto *", list(produtos_op.keys()))
+                produto_id = produtos_op.get(produto_rotulo)
+                tipo_mov = st.selectbox("Tipo de movimentação", EstoqueRepository.TIPOS_MOVIMENTO)
+                data_mov = st.text_input("Data do movimento", placeholder="DD/MM/AAAA")
+            with c2:
+                quantidade = st.number_input("Quantidade", min_value=0.0, step=1.0)
+                valor_unitario = st.number_input("Valor unitário", min_value=0.0, step=1.0)
+                valor_total = quantidade * valor_unitario
+                st.write(f"**Valor total estimado:** R$ {valor_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+            with c3:
+                pessoa_rotulo = st.selectbox("Pessoa relacionada", list(pessoas_op.keys()))
+                pessoa_id, pessoa_nome = pessoas_op[pessoa_rotulo]
+                destino_tipo = st.selectbox("Destino / Aplicação", ["", "Animal específico", "Categoria", "Manejo", "Todos os Animais"])
+
+            animal_sbb = categoria_animal = manejo = ""
+            if destino_tipo == "Animal específico":
+                animal_rotulo = st.selectbox("Animal", list(animais_op.keys()))
+                animal_sbb = animais_op.get(animal_rotulo, "")
+            elif destino_tipo == "Categoria":
+                categoria_animal = st.text_input("Categoria animal", placeholder="Ex: Égua Adulta")
+            elif destino_tipo == "Manejo":
+                manejo = st.text_input("Manejo", placeholder="Ex: Cabanha, Pastagem")
+
+            observacoes = st.text_area("Observações da movimentação")
+            salvar_mov = st.form_submit_button("Salvar movimentação", type="primary", use_container_width=True)
+            if salvar_mov:
+                if not produto_id:
+                    st.warning("Selecione um produto.")
+                elif quantidade <= 0:
+                    st.warning("Informe quantidade maior que zero.")
+                elif destino_tipo == "Animal específico" and not animal_sbb:
+                    st.warning("Selecione o animal do destino.")
+                else:
+                    mov_id = EstoqueRepository.salvar_movimentacao({
+                        "produto_id": produto_id,
+                        "tipo_movimento": tipo_mov,
+                        "data_movimento": data_mov,
+                        "quantidade": quantidade,
+                        "valor_unitario": valor_unitario,
+                        "valor_total": valor_total,
+                        "pessoa_id": pessoa_id,
+                        "pessoa_nome": pessoa_nome,
+                        "destino_tipo": destino_tipo,
+                        "animal_sbb": animal_sbb,
+                        "categoria_animal": categoria_animal,
+                        "manejo": manejo,
+                        "observacoes": observacoes,
+                    })
+                    st.session_state["estoque_mov_msg"] = f"✅ Movimentação #{mov_id} registrada com sucesso. O formulário foi limpo."
+                    st.session_state["estoque_mov_form_version"] = versao_mov + 1
+                    st.rerun()
+
+        st.markdown("### Movimentações registradas")
+        mf1, mf2, mf3 = st.columns(3)
+        m_tipo = mf1.selectbox("Movimento", [""] + EstoqueRepository.TIPOS_MOVIMENTO, key="estoque_f_mov")
+        m_cat = mf2.selectbox("Categoria produto", [""] + EstoqueRepository.CATEGORIAS, key="estoque_f_cat_mov")
+        m_busca = mf3.text_input("Buscar", key="estoque_f_busca_mov")
+        movs = EstoqueRepository.listar_movimentacoes({"tipo_movimento": m_tipo, "categoria": m_cat, "busca": m_busca})
+        df_mov = pd.DataFrame(movs)
+        st.dataframe(df_mov, use_container_width=True, hide_index=True)
+        if not df_mov.empty:
+            mov_excluir = st.selectbox("Excluir movimentação", [""] + [str(x) for x in df_mov["id"].tolist()], key="estoque_excluir_mov")
+            if mov_excluir and st.button("Confirmar exclusão da movimentação"):
+                EstoqueRepository.excluir_movimentacao(int(mov_excluir))
+                st.success("Movimentação excluída logicamente.")
+                st.rerun()
+
+    with tab_saldos:
+        st.markdown("### Saldos e alertas")
+        saldos = EstoqueRepository.saldos()
+        df_saldos = pd.DataFrame(saldos)
+        if not df_saldos.empty:
+            baixo = df_saldos[df_saldos["Saldo"] <= df_saldos["Estoque Mínimo"]]
+            st.metric("Produtos cadastrados", len(df_saldos))
+            st.metric("Produtos abaixo/igual ao mínimo", len(baixo))
+            st.dataframe(df_saldos, use_container_width=True, hide_index=True)
+            if not baixo.empty:
+                st.warning("Existem produtos com saldo abaixo ou igual ao estoque mínimo.")
+                st.dataframe(baixo, use_container_width=True, hide_index=True)
+        else:
+            st.info("Nenhum produto ativo cadastrado ainda.")
+
+
+aba_cad, aba_fila, aba_animais, aba_pessoas, aba_financeiro, aba_estoque = st.tabs(["Cadastrar por SBB", "Fila de Extração", "Cadastro Completo", "Pessoas", "Financeiro", "Estoque"])
 
 with aba_cad:
     st.subheader("Informar SBBs para cadastro")
     st.write("Use o botão **+ Adicionar SBB** para montar a lista antes de iniciar a extração.")
+
+    if st.session_state.get("sbb_cadastro_msg"):
+        st.success(st.session_state.pop("sbb_cadastro_msg"))
 
     if "sbb_inputs" not in st.session_state:
         st.session_state.sbb_inputs = [""]
@@ -156,6 +948,8 @@ with aba_cad:
     with col2:
         if st.button("Limpar lista", use_container_width=True):
             st.session_state.sbb_inputs = [""]
+            limpar_chaves_session(["sbb_"])
+            st.session_state.sbb_cadastro_msg = "Lista limpa para novo cadastro."
             st.rerun()
     with col3:
         if st.button("Cadastrar e colocar na fila", type="primary", use_container_width=True):
@@ -169,7 +963,10 @@ with aba_cad:
             else:
                 for sbb in lista:
                     inserir_fila(sbb)
-                st.success(f"{len(lista)} SBB(s) enviado(s) para a fila de extração.")
+                st.session_state.sbb_inputs = [""]
+                limpar_chaves_session(["sbb_"])
+                st.session_state.sbb_cadastro_msg = f"✅ {len(lista)} SBB(s) enviado(s) para a fila de extração. O formulário foi limpo."
+                st.rerun()
 
     st.divider()
     st.info("Nesta etapa o sistema grava os dados em banco. A planilha deixa de ser o destino final e passa a servir apenas como referência de estrutura.")
@@ -277,6 +1074,8 @@ with aba_animais:
     ])
 
     with tab_resumo:
+        if st.session_state.get("animal_cadastro_msg"):
+            st.success(st.session_state.pop("animal_cadastro_msg"))
         st.markdown("### Dados manuais da cabanha")
         col_a, col_b, col_c = st.columns(3)
 
@@ -350,7 +1149,7 @@ with aba_animais:
                 valor_aquisicao=valor,
                 observacoes=observacoes,
             )
-            st.success("Cadastro atualizado.")
+            st.session_state.animal_cadastro_msg = "✅ Cadastro do animal atualizado com sucesso."
             st.rerun()
 
         st.markdown("### Filiação")
@@ -434,17 +1233,18 @@ with aba_animais:
                 st.warning("Botão reservado. Na próxima etapa conectamos o script do HTML colorido da 6ª geração.")
         with colp2:
             st.caption("A base já está preparada para armazenar o HTML colorido por animal e geração.")
-        df_pedigree = pd.DataFrame(pedigree)
-        if not df_pedigree.empty:
-            colunas_visiveis = [c for c in ["bloco", "texto_completo"] if c in df_pedigree.columns]
-            df_pedigree = traduzir_colunas_df(df_pedigree[colunas_visiveis], CAMPOS_PEDIGREE_VISIVEIS)
+        pedigree_visivel = montar_pedigree_visivel(pedigree)
+        df_pedigree = pd.DataFrame(pedigree_visivel)
         mostrar_df(df_pedigree, "Nenhum pedigree extraído para este animal.")
 
 
     with tab_venda_parceria:
+        if st.session_state.get("venda_parceria_msg"):
+            st.success(st.session_state.pop("venda_parceria_msg"))
         st.markdown("### Venda do animal")
         st.caption("Ao informar data de entrega, o animal muda para 'Vendido e entregue' e sai das listas operacionais futuras, mantendo histórico para consulta.")
-        with st.form("form_venda_animal"):
+        venda_form_version = st.session_state.get("venda_form_version", 0)
+        with st.form(f"form_venda_animal_{sbb}_{venda_form_version}"):
             cv1, cv2, cv3 = st.columns(3)
             with cv1:
                 comprador_nome = st.text_input("Comprador")
@@ -466,7 +1266,8 @@ with aba_animais:
                     data_venda=data_venda, data_entrega=data_entrega, valor_venda=valor_venda,
                     condicao_pagamento=condicao_pagamento, status_entrega=status_entrega, observacoes=obs_venda,
                 )
-                st.success("Venda registrada.")
+                st.session_state.venda_form_version = st.session_state.get("venda_form_version", 0) + 1
+                st.session_state.venda_parceria_msg = "✅ Venda registrada com sucesso. O formulário foi limpo."
                 st.rerun()
 
         vendas = listar_vendas_animal(sbb)
@@ -474,7 +1275,8 @@ with aba_animais:
 
         st.divider()
         st.markdown("### Parceria")
-        with st.form("form_parceria_animal"):
+        parceria_form_version = st.session_state.get("parceria_form_version", 0)
+        with st.form(f"form_parceria_animal_{sbb}_{parceria_form_version}"):
             cp1, cp2, cp3 = st.columns(3)
             with cp1:
                 parceiro_nome = st.text_input("Parceiro")
@@ -495,7 +1297,8 @@ with aba_animais:
                     modelo_parceria=modelo_parceria, data_inicio=data_inicio, data_fim=data_fim,
                     ativo=ativo_parceria, observacoes=obs_parceria,
                 )
-                st.success("Parceria registrada.")
+                st.session_state.parceria_form_version = st.session_state.get("parceria_form_version", 0) + 1
+                st.session_state.venda_parceria_msg = "✅ Parceria registrada com sucesso. O formulário foi limpo."
                 st.rerun()
 
         parcerias = listar_parcerias_animal(sbb)
@@ -506,3 +1309,14 @@ with aba_animais:
         historico = listar_historico_status(sbb)
         mostrar_df(pd.DataFrame(historico), "Nenhuma alteração de status registrada.")
         st.info("Nesta aba ficará a linha do tempo do animal. Por enquanto começamos pelo histórico de status; depois sanidade, reprodução, morfologia e financeiro também alimentarão esta linha do tempo.")
+
+
+with aba_pessoas:
+    render_modulo_pessoas()
+
+
+with aba_financeiro:
+    render_modulo_financeiro()
+
+with aba_estoque:
+    render_modulo_estoque()

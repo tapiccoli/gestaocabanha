@@ -237,6 +237,44 @@ def init_db():
     """)
 
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS pessoas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome_razao TEXT NOT NULL,
+        nome_fantasia TEXT,
+        tipo_pessoa TEXT,
+        tipo_documento TEXT,
+        documento TEXT,
+        email TEXT,
+        whatsapp TEXT,
+        telefone TEXT,
+        cidade TEXT,
+        uf TEXT,
+        endereco TEXT,
+        pix TEXT,
+        banco TEXT,
+        agencia TEXT,
+        conta TEXT,
+        observacoes TEXT,
+        ativo INTEGER DEFAULT 1,
+        criado_em TEXT,
+        atualizado_em TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS pessoa_papeis (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pessoa_id INTEGER NOT NULL,
+        papel TEXT NOT NULL,
+        ativo INTEGER DEFAULT 1,
+        criado_em TEXT,
+        UNIQUE(pessoa_id, papel),
+        FOREIGN KEY(pessoa_id) REFERENCES pessoas(id)
+    )
+    """)
+
+
     def garantir_coluna(tabela, coluna, definicao):
         existentes = [r[1] for r in conn.execute(f"PRAGMA table_info({tabela})").fetchall()]
         if coluna not in existentes:
@@ -256,8 +294,33 @@ def init_db():
     garantir_coluna("animais", "data_saida_ecossistema", "TEXT")
     garantir_coluna("animais", "observacoes", "TEXT")
 
+    # Migração leve da tabela de pessoas.
+    garantir_coluna("pessoas", "nome_fantasia", "TEXT")
+    garantir_coluna("pessoas", "tipo_pessoa", "TEXT")
+    garantir_coluna("pessoas", "tipo_documento", "TEXT")
+    garantir_coluna("pessoas", "documento", "TEXT")
+    garantir_coluna("pessoas", "email", "TEXT")
+    garantir_coluna("pessoas", "whatsapp", "TEXT")
+    garantir_coluna("pessoas", "telefone", "TEXT")
+    garantir_coluna("pessoas", "cidade", "TEXT")
+    garantir_coluna("pessoas", "uf", "TEXT")
+    garantir_coluna("pessoas", "endereco", "TEXT")
+    garantir_coluna("pessoas", "pix", "TEXT")
+    garantir_coluna("pessoas", "banco", "TEXT")
+    garantir_coluna("pessoas", "agencia", "TEXT")
+    garantir_coluna("pessoas", "conta", "TEXT")
+    garantir_coluna("pessoas", "observacoes", "TEXT")
+    garantir_coluna("pessoas", "ativo", "INTEGER DEFAULT 1")
+    garantir_coluna("pessoas", "criado_em", "TEXT")
+    garantir_coluna("pessoas", "atualizado_em", "TEXT")
+
     conn.commit()
     conn.close()
+
+    try:
+        init_financeiro_db()
+    except NameError:
+        pass
 
 
 def inserir_fila(sbb: str):
@@ -548,3 +611,660 @@ def listar_parcerias_animal(sbb):
     rows = conn.execute("SELECT * FROM animal_parcerias WHERE animal_sbb=? ORDER BY id DESC", (sbb,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ============================================================
+# PESSOAS
+# ============================================================
+PAPEIS_PADRAO = [
+    "Cliente",
+    "Fornecedor",
+    "Veterinário",
+    "Ferrador",
+    "Treinador/Domador",
+    "Funcionário",
+    "Parceiro",
+    "Transportador",
+    "Leiloeira",
+    "Criador",
+    "Proprietário",
+    "Outro",
+]
+
+
+def normalizar_papeis(papeis):
+    if not papeis:
+        return []
+    vistos = []
+    for papel in papeis:
+        papel = str(papel or "").strip()
+        if papel and papel not in vistos:
+            vistos.append(papel)
+    return vistos
+
+
+def salvar_pessoa(dados, papeis):
+    conn = get_conn()
+    pessoa_id = dados.get("id")
+    agora = now_br()
+    valores = (
+        dados.get("nome_razao"), dados.get("nome_fantasia"), dados.get("tipo_pessoa"),
+        dados.get("tipo_documento"), dados.get("documento"), dados.get("email"),
+        dados.get("whatsapp"), dados.get("telefone"), dados.get("cidade"), dados.get("uf"),
+        dados.get("endereco"), dados.get("pix"), dados.get("banco"), dados.get("agencia"),
+        dados.get("conta"), dados.get("observacoes"), int(bool(dados.get("ativo", 1))), agora,
+    )
+    if pessoa_id:
+        conn.execute("""
+            UPDATE pessoas
+            SET nome_razao=?, nome_fantasia=?, tipo_pessoa=?, tipo_documento=?, documento=?, email=?, whatsapp=?, telefone=?,
+                cidade=?, uf=?, endereco=?, pix=?, banco=?, agencia=?, conta=?, observacoes=?, ativo=?, atualizado_em=?
+            WHERE id=?
+        """, valores + (pessoa_id,))
+    else:
+        cur = conn.execute("""
+            INSERT INTO pessoas (
+                nome_razao, nome_fantasia, tipo_pessoa, tipo_documento, documento, email, whatsapp, telefone,
+                cidade, uf, endereco, pix, banco, agencia, conta, observacoes, ativo, criado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, valores)
+        pessoa_id = cur.lastrowid
+
+    conn.execute("UPDATE pessoa_papeis SET ativo=0 WHERE pessoa_id=?", (pessoa_id,))
+    for papel in normalizar_papeis(papeis):
+        conn.execute("""
+            INSERT INTO pessoa_papeis (pessoa_id, papel, ativo, criado_em)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(pessoa_id, papel) DO UPDATE SET ativo=1
+        """, (pessoa_id, papel, agora))
+    conn.commit(); conn.close()
+    return pessoa_id
+
+
+def listar_pessoas(incluir_inativos=False, busca="", papel=""):
+    conn = get_conn()
+    where = []
+    params = []
+    if not incluir_inativos:
+        where.append("p.ativo=1")
+    if busca:
+        termo = f"%{busca.strip()}%"
+        where.append("(p.nome_razao LIKE ? OR p.nome_fantasia LIKE ? OR p.documento LIKE ? OR p.email LIKE ? OR p.whatsapp LIKE ?)")
+        params += [termo, termo, termo, termo, termo]
+    if papel:
+        where.append("EXISTS (SELECT 1 FROM pessoa_papeis pp WHERE pp.pessoa_id=p.id AND pp.ativo=1 AND pp.papel=?)")
+        params.append(papel)
+    sql_where = " WHERE " + " AND ".join(where) if where else ""
+    rows = conn.execute(f"""
+        SELECT p.*,
+               COALESCE((SELECT GROUP_CONCAT(pp.papel, ', ') FROM pessoa_papeis pp WHERE pp.pessoa_id=p.id AND pp.ativo=1), '') AS papeis
+        FROM pessoas p
+        {sql_where}
+        ORDER BY p.ativo DESC, p.nome_razao COLLATE NOCASE
+    """, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def buscar_pessoa(pessoa_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM pessoas WHERE id=?", (pessoa_id,)).fetchone()
+    if not row:
+        conn.close(); return None
+    papeis = conn.execute("SELECT papel FROM pessoa_papeis WHERE pessoa_id=? AND ativo=1 ORDER BY papel", (pessoa_id,)).fetchall()
+    conn.close()
+    dados = dict(row)
+    dados["papeis_lista"] = [p["papel"] for p in papeis]
+    return dados
+
+
+def excluir_pessoa(pessoa_id):
+    """Exclusão lógica: preserva histórico e só desativa a pessoa."""
+    conn = get_conn()
+    conn.execute("UPDATE pessoas SET ativo=0, atualizado_em=? WHERE id=?", (now_br(), pessoa_id))
+    conn.commit(); conn.close()
+
+
+def reativar_pessoa(pessoa_id):
+    conn = get_conn()
+    conn.execute("UPDATE pessoas SET ativo=1, atualizado_em=? WHERE id=?", (now_br(), pessoa_id))
+    conn.commit(); conn.close()
+
+# ============================================================
+# FINANCEIRO BASE v0.4
+# ============================================================
+CENTROS_CUSTO_PADRAO = [
+    "Alimentação", "Suplementação", "Sanidade", "Reprodução", "Doma", "Treinamento",
+    "Ferrageamento", "Frete / Transporte", "Leilões", "Mão de obra", "Manutenção",
+    "Pastagens / Potreiros", "Custos Operacionais", "Venda de Animais", "Outros",
+]
+
+ATIVIDADES_PADRAO = [
+    "Geral", "Reprodução", "Sanidade", "Doma", "Treinamento", "Competição", "Leilão",
+    "Venda", "Manejo diário", "Pastagem / Potreiro", "Estoque", "Administrativo",
+]
+
+FORMAS_PAGAMENTO_PADRAO = ["", "Dinheiro", "Pix", "Boleto", "Cartão", "Transferência", "Cheque", "Permuta", "Outro"]
+STATUS_PARCELA_PADRAO = ["Aberta", "Paga", "Recebida", "Vencida", "Cancelada"]
+
+
+def init_financeiro_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS financeiro_lancamentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tipo TEXT,
+        descricao TEXT,
+        data_competencia TEXT,
+        data_emissao TEXT,
+        valor_total REAL DEFAULT 0,
+        pessoa_id INTEGER,
+        pessoa_nome TEXT,
+        centro_custo TEXT,
+        atividade TEXT,
+        origem_modulo TEXT,
+        forma_pagamento TEXT,
+        status_lancamento TEXT DEFAULT 'Ativo',
+        observacoes TEXT,
+        animal_sbb TEXT,
+        motivo TEXT,
+        fornecedor TEXT,
+        valor REAL,
+        data_lancamento TEXT,
+        observacao TEXT,
+        criado_em TEXT,
+        atualizado_em TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS financeiro_parcelas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lancamento_id INTEGER NOT NULL,
+        numero_parcela INTEGER,
+        data_vencimento TEXT,
+        data_pagamento TEXT,
+        valor_previsto REAL DEFAULT 0,
+        valor_pago REAL DEFAULT 0,
+        status TEXT DEFAULT 'Aberta',
+        observacoes TEXT,
+        criado_em TEXT,
+        atualizado_em TEXT,
+        FOREIGN KEY(lancamento_id) REFERENCES financeiro_lancamentos(id)
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS financeiro_rateios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lancamento_id INTEGER NOT NULL,
+        criterio_rateio TEXT,
+        animal_sbb TEXT,
+        categoria_animal TEXT,
+        manejo TEXT,
+        percentual REAL DEFAULT 0,
+        valor_rateado REAL DEFAULT 0,
+        observacoes TEXT,
+        criado_em TEXT,
+        FOREIGN KEY(lancamento_id) REFERENCES financeiro_lancamentos(id)
+    )
+    """)
+
+    def garantir_coluna(tabela, coluna, definicao):
+        existentes = [r[1] for r in conn.execute(f"PRAGMA table_info({tabela})").fetchall()]
+        if coluna not in existentes:
+            conn.execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna} {definicao}")
+
+    for coluna, definicao in {
+        "tipo": "TEXT",
+        "descricao": "TEXT",
+        "data_competencia": "TEXT",
+        "data_emissao": "TEXT",
+        "valor_total": "REAL DEFAULT 0",
+        "pessoa_id": "INTEGER",
+        "pessoa_nome": "TEXT",
+        "centro_custo": "TEXT",
+        "atividade": "TEXT",
+        "origem_modulo": "TEXT",
+        "forma_pagamento": "TEXT",
+        "status_lancamento": "TEXT DEFAULT 'Ativo'",
+        "observacoes": "TEXT",
+        "atualizado_em": "TEXT",
+    }.items():
+        garantir_coluna("financeiro_lancamentos", coluna, definicao)
+
+    conn.commit(); conn.close()
+
+
+def salvar_lancamento_financeiro(dados, parcelas, rateios):
+    init_financeiro_db()
+    conn = get_conn(); cur = conn.cursor()
+    valor_total = float(dados.get("valor_total") or 0)
+    descricao = (dados.get("descricao") or dados.get("motivo") or "").strip()
+    pessoa_nome = dados.get("pessoa_nome") or ""
+    cur.execute("""
+        INSERT INTO financeiro_lancamentos (
+            tipo, descricao, data_competencia, data_emissao, valor_total,
+            pessoa_id, pessoa_nome, centro_custo, atividade, origem_modulo,
+            forma_pagamento, status_lancamento, observacoes,
+            motivo, fornecedor, valor, data_lancamento, observacao, criado_em, atualizado_em
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ativo', ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        dados.get("tipo"), descricao, dados.get("data_competencia"), dados.get("data_emissao"), valor_total,
+        dados.get("pessoa_id"), pessoa_nome, dados.get("centro_custo"), dados.get("atividade"), dados.get("origem_modulo") or "Manual",
+        dados.get("forma_pagamento"), dados.get("observacoes"), descricao, pessoa_nome, valor_total,
+        dados.get("data_competencia"), dados.get("observacoes"), now_br(), now_br(),
+    ))
+    lancamento_id = cur.lastrowid
+    if not parcelas:
+        parcelas = [{"numero_parcela": 1, "data_vencimento": dados.get("data_competencia") or dados.get("data_emissao"), "valor_previsto": valor_total, "status": "Aberta", "observacoes": ""}]
+    for parcela in parcelas:
+        cur.execute("""
+            INSERT INTO financeiro_parcelas (lancamento_id, numero_parcela, data_vencimento, valor_previsto, status, observacoes, criado_em, atualizado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (lancamento_id, parcela.get("numero_parcela"), parcela.get("data_vencimento"), float(parcela.get("valor_previsto") or 0), parcela.get("status") or "Aberta", parcela.get("observacoes") or "", now_br(), now_br()))
+    if not rateios:
+        rateios = [{"criterio_rateio": "Global", "animal_sbb": "", "categoria_animal": "", "manejo": "", "percentual": 100, "valor_rateado": valor_total, "observacoes": ""}]
+    for rateio in rateios:
+        cur.execute("""
+            INSERT INTO financeiro_rateios (lancamento_id, criterio_rateio, animal_sbb, categoria_animal, manejo, percentual, valor_rateado, observacoes, criado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (lancamento_id, rateio.get("criterio_rateio") or "Global", rateio.get("animal_sbb") or "", rateio.get("categoria_animal") or "", rateio.get("manejo") or "", float(rateio.get("percentual") or 0), float(rateio.get("valor_rateado") or 0), rateio.get("observacoes") or "", now_br()))
+    conn.commit(); conn.close(); return lancamento_id
+
+
+
+def atualizar_lancamento_financeiro(lancamento_id, dados, parcelas, rateios):
+    """Atualiza um lançamento financeiro e recria parcelas/rateios.
+
+    Uso previsto: correção de lançamentos cadastrados com erro.
+    Para manter o financeiro consistente, as parcelas e rateios anteriores são substituídos
+    pela nova composição informada na tela de edição.
+    """
+    init_financeiro_db()
+    conn = get_conn(); cur = conn.cursor()
+    valor_total = float(dados.get("valor_total") or 0)
+    descricao = (dados.get("descricao") or dados.get("motivo") or "").strip()
+    pessoa_nome = dados.get("pessoa_nome") or ""
+
+    cur.execute("""
+        UPDATE financeiro_lancamentos
+        SET tipo=?, descricao=?, data_competencia=?, data_emissao=?, valor_total=?,
+            pessoa_id=?, pessoa_nome=?, centro_custo=?, atividade=?, origem_modulo=?,
+            forma_pagamento=?, observacoes=?, motivo=?, fornecedor=?, valor=?,
+            data_lancamento=?, observacao=?, atualizado_em=?
+        WHERE id=?
+    """, (
+        dados.get("tipo"), descricao, dados.get("data_competencia"), dados.get("data_emissao"), valor_total,
+        dados.get("pessoa_id"), pessoa_nome, dados.get("centro_custo"), dados.get("atividade"), dados.get("origem_modulo") or "Manual",
+        dados.get("forma_pagamento"), dados.get("observacoes"), descricao, pessoa_nome, valor_total,
+        dados.get("data_competencia"), dados.get("observacoes"), now_br(), lancamento_id,
+    ))
+
+    cur.execute("DELETE FROM financeiro_parcelas WHERE lancamento_id=?", (lancamento_id,))
+    cur.execute("DELETE FROM financeiro_rateios WHERE lancamento_id=?", (lancamento_id,))
+
+    if not parcelas:
+        parcelas = [{"numero_parcela": 1, "data_vencimento": dados.get("data_competencia") or dados.get("data_emissao"), "valor_previsto": valor_total, "status": "Aberta", "observacoes": ""}]
+    for parcela in parcelas:
+        cur.execute("""
+            INSERT INTO financeiro_parcelas (lancamento_id, numero_parcela, data_vencimento, valor_previsto, status, observacoes, criado_em, atualizado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (lancamento_id, parcela.get("numero_parcela"), parcela.get("data_vencimento"), float(parcela.get("valor_previsto") or 0), parcela.get("status") or "Aberta", parcela.get("observacoes") or "", now_br(), now_br()))
+
+    if not rateios:
+        rateios = [{"criterio_rateio": "Global", "animal_sbb": "", "categoria_animal": "", "manejo": "", "percentual": 100, "valor_rateado": valor_total, "observacoes": ""}]
+    for rateio in rateios:
+        cur.execute("""
+            INSERT INTO financeiro_rateios (lancamento_id, criterio_rateio, animal_sbb, categoria_animal, manejo, percentual, valor_rateado, observacoes, criado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (lancamento_id, rateio.get("criterio_rateio") or "Global", rateio.get("animal_sbb") or "", rateio.get("categoria_animal") or "", rateio.get("manejo") or "", float(rateio.get("percentual") or 0), float(rateio.get("valor_rateado") or 0), rateio.get("observacoes") or "", now_br()))
+
+    conn.commit(); conn.close(); return True
+
+def listar_lancamentos_financeiros(filtros=None):
+    init_financeiro_db(); filtros = filtros or {}
+    where = ["COALESCE(l.status_lancamento, 'Ativo') <> 'Excluído'"]; params = []
+    for campo in ["tipo", "centro_custo", "atividade", "origem_modulo", "pessoa_id"]:
+        if filtros.get(campo):
+            where.append(f"l.{campo}=?"); params.append(filtros[campo])
+    if filtros.get("busca"):
+        where.append("(LOWER(l.descricao) LIKE ? OR LOWER(COALESCE(l.pessoa_nome,'')) LIKE ? OR LOWER(COALESCE(l.observacoes,'')) LIKE ?)")
+        termo = f"%{str(filtros['busca']).lower()}%"; params.extend([termo, termo, termo])
+    if filtros.get("data_inicio"):
+        where.append("l.data_competencia >= ?"); params.append(filtros["data_inicio"])
+    if filtros.get("data_fim"):
+        where.append("l.data_competencia <= ?"); params.append(filtros["data_fim"])
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT l.id, l.tipo AS Tipo, l.data_competencia AS Data, l.descricao AS Descrição,
+               l.valor_total AS Valor, COALESCE(p.nome_razao, l.pessoa_nome, '') AS Pessoa,
+               l.centro_custo AS 'Centro de Custo', l.atividade AS Atividade, l.origem_modulo AS Origem,
+               l.forma_pagamento AS 'Forma de Pagamento', l.status_lancamento AS Status
+        FROM financeiro_lancamentos l
+        LEFT JOIN pessoas p ON p.id = l.pessoa_id
+        WHERE {' AND '.join(where)}
+        ORDER BY l.id DESC
+    """, params).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def buscar_lancamento_financeiro(lancamento_id):
+    init_financeiro_db(); conn = get_conn()
+    row = conn.execute("SELECT * FROM financeiro_lancamentos WHERE id=?", (lancamento_id,)).fetchone()
+    conn.close(); return dict(row) if row else None
+
+
+def listar_parcelas_financeiras(lancamento_id=None, filtros=None):
+    init_financeiro_db(); filtros = filtros or {}
+    where = ["COALESCE(l.status_lancamento, 'Ativo') <> 'Excluído'"]; params = []
+    if lancamento_id:
+        where.append("p.lancamento_id=?"); params.append(lancamento_id)
+    for campo_l, chave in [("tipo", "tipo"), ("centro_custo", "centro_custo"), ("atividade", "atividade")]:
+        if filtros.get(chave):
+            where.append(f"l.{campo_l}=?"); params.append(filtros[chave])
+    if filtros.get("status_parcela"):
+        where.append("p.status=?"); params.append(filtros["status_parcela"])
+    if filtros.get("data_inicio"):
+        where.append("p.data_vencimento >= ?"); params.append(filtros["data_inicio"])
+    if filtros.get("data_fim"):
+        where.append("p.data_vencimento <= ?"); params.append(filtros["data_fim"])
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT p.id, p.lancamento_id AS Lançamento, l.tipo AS Tipo, l.descricao AS Descrição,
+               COALESCE(pe.nome_razao, l.pessoa_nome, '') AS Pessoa, p.numero_parcela AS Parcela,
+               p.data_vencimento AS Vencimento, p.data_pagamento AS Pagamento,
+               p.valor_previsto AS 'Valor Previsto', p.valor_pago AS 'Valor Pago', p.status AS Status,
+               l.centro_custo AS 'Centro de Custo', l.atividade AS Atividade
+        FROM financeiro_parcelas p
+        JOIN financeiro_lancamentos l ON l.id = p.lancamento_id
+        LEFT JOIN pessoas pe ON pe.id = l.pessoa_id
+        WHERE {' AND '.join(where)}
+        ORDER BY p.data_vencimento, p.id
+    """, params).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def listar_rateios_financeiros(lancamento_id):
+    init_financeiro_db(); conn = get_conn()
+    rows = conn.execute("""
+        SELECT r.id, r.criterio_rateio AS Critério, r.animal_sbb AS Animal, a.nome AS 'Nome Animal',
+               r.categoria_animal AS Categoria, r.manejo AS Manejo, r.percentual AS Percentual,
+               r.valor_rateado AS 'Valor Rateado', r.observacoes AS Observações
+        FROM financeiro_rateios r
+        LEFT JOIN animais a ON a.sbb = r.animal_sbb
+        WHERE r.lancamento_id=? ORDER BY r.id
+    """, (lancamento_id,)).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def pagar_parcela_financeira(parcela_id, data_pagamento, valor_pago=None):
+    init_financeiro_db(); conn = get_conn()
+    row = conn.execute("SELECT valor_previsto FROM financeiro_parcelas WHERE id=?", (parcela_id,)).fetchone()
+    if not row:
+        conn.close(); return False
+    lanc = conn.execute("SELECT l.tipo FROM financeiro_parcelas p JOIN financeiro_lancamentos l ON l.id=p.lancamento_id WHERE p.id=?", (parcela_id,)).fetchone()
+    status = "Paga" if lanc and lanc["tipo"] == "Saída" else "Recebida"
+    valor = float(valor_pago if valor_pago is not None else row["valor_previsto"] or 0)
+    conn.execute("UPDATE financeiro_parcelas SET data_pagamento=?, valor_pago=?, status=?, atualizado_em=? WHERE id=?", (data_pagamento, valor, status, now_br(), parcela_id))
+    conn.commit(); conn.close(); return True
+
+
+def excluir_lancamento_financeiro(lancamento_id):
+    init_financeiro_db(); conn = get_conn()
+    conn.execute("UPDATE financeiro_lancamentos SET status_lancamento='Excluído', atualizado_em=? WHERE id=?", (now_br(), lancamento_id))
+    conn.commit(); conn.close(); return True
+
+
+def indicadores_financeiros(filtros=None):
+    parcelas = listar_parcelas_financeiras(filtros=filtros or {})
+    saidas = entradas = pago = recebido = aberto_pagar = aberto_receber = 0.0
+    for p in parcelas:
+        prev = float(p.get("Valor Previsto") or 0); real = float(p.get("Valor Pago") or 0)
+        if p.get("Tipo") == "Entrada":
+            entradas += prev
+            if p.get("Status") == "Recebida": recebido += real or prev
+            elif p.get("Status") != "Cancelada": aberto_receber += prev
+        elif p.get("Tipo") == "Saída":
+            saidas += prev
+            if p.get("Status") == "Paga": pago += real or prev
+            elif p.get("Status") != "Cancelada": aberto_pagar += prev
+    return {
+        "entradas_previstas": entradas, "saidas_previstas": saidas, "saldo_previsto": entradas - saidas,
+        "recebido": recebido, "pago": pago, "saldo_realizado": recebido - pago,
+        "aberto_receber": aberto_receber, "aberto_pagar": aberto_pagar,
+    }
+
+# ============================================================
+# ESTOQUE v0.5
+# ============================================================
+CATEGORIAS_ESTOQUE_PADRAO = [
+    "Ração",
+    "Suplemento",
+    "Medicamento",
+    "Vacina",
+    "Vermífugo",
+    "Material de manejo",
+    "Material veterinário",
+    "Sêmen / Palheta",
+    "Feno / Volumoso",
+    "Outro",
+]
+
+UNIDADES_ESTOQUE_PADRAO = ["kg", "g", "L", "mL", "un", "dose", "saco", "fardo", "palheta"]
+
+TIPOS_MOV_ESTOQUE = ["Entrada", "Saída / Consumo", "Ajuste"]
+
+
+def init_estoque_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estoque_produtos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        categoria TEXT,
+        apresentacao TEXT,
+        laboratorio_fabricante TEXT,
+        unidade TEXT,
+        estoque_minimo REAL DEFAULT 0,
+        valor_unitario REAL DEFAULT 0,
+        data_vencimento TEXT,
+        observacoes TEXT,
+        ativo INTEGER DEFAULT 1,
+        criado_em TEXT,
+        atualizado_em TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estoque_movimentacoes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        produto_id INTEGER NOT NULL,
+        tipo_movimento TEXT NOT NULL,
+        data_movimento TEXT,
+        quantidade REAL DEFAULT 0,
+        valor_unitario REAL DEFAULT 0,
+        valor_total REAL DEFAULT 0,
+        pessoa_id INTEGER,
+        pessoa_nome TEXT,
+        destino_tipo TEXT,
+        animal_sbb TEXT,
+        categoria_animal TEXT,
+        manejo TEXT,
+        observacoes TEXT,
+        status_movimento TEXT DEFAULT 'Ativo',
+        criado_em TEXT,
+        atualizado_em TEXT,
+        FOREIGN KEY(produto_id) REFERENCES estoque_produtos(id)
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def salvar_produto_estoque(dados):
+    init_estoque_db()
+    conn = get_conn()
+    cur = conn.cursor()
+    agora = now_br()
+    produto_id = dados.get("id")
+    valores = (
+        (dados.get("nome") or "").strip(),
+        dados.get("categoria") or "",
+        dados.get("apresentacao") or "",
+        dados.get("laboratorio_fabricante") or "",
+        dados.get("unidade") or "",
+        float(dados.get("estoque_minimo") or 0),
+        float(dados.get("valor_unitario") or 0),
+        dados.get("data_vencimento") or "",
+        dados.get("observacoes") or "",
+        int(dados.get("ativo", 1)),
+    )
+    if produto_id:
+        cur.execute("""
+            UPDATE estoque_produtos
+            SET nome=?, categoria=?, apresentacao=?, laboratorio_fabricante=?, unidade=?, estoque_minimo=?,
+                valor_unitario=?, data_vencimento=?, observacoes=?, ativo=?, atualizado_em=?
+            WHERE id=?
+        """, valores + (agora, produto_id))
+    else:
+        cur.execute("""
+            INSERT INTO estoque_produtos (
+                nome, categoria, apresentacao, laboratorio_fabricante, unidade, estoque_minimo,
+                valor_unitario, data_vencimento, observacoes, ativo, criado_em, atualizado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, valores + (agora, agora))
+        produto_id = cur.lastrowid
+    conn.commit(); conn.close()
+    return produto_id
+
+
+def listar_produtos_estoque(incluir_inativos=False, busca="", categoria=""):
+    init_estoque_db()
+    where = [] if incluir_inativos else ["ativo=1"]
+    params = []
+    if busca:
+        where.append("(LOWER(nome) LIKE ? OR LOWER(COALESCE(apresentacao,'')) LIKE ? OR LOWER(COALESCE(laboratorio_fabricante,'')) LIKE ?)")
+        termo = f"%{str(busca).lower()}%"; params.extend([termo, termo, termo])
+    if categoria:
+        where.append("categoria=?"); params.append(categoria)
+    sql_where = "WHERE " + " AND ".join(where) if where else ""
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT id, nome AS Produto, categoria AS Categoria, apresentacao AS Apresentação,
+               laboratorio_fabricante AS 'Laboratório/Fabricante', unidade AS Unidade,
+               estoque_minimo AS 'Estoque Mínimo', valor_unitario AS 'Valor Unitário',
+               data_vencimento AS Vencimento, ativo AS Ativo
+        FROM estoque_produtos
+        {sql_where}
+        ORDER BY nome
+    """, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def buscar_produto_estoque(produto_id):
+    init_estoque_db(); conn = get_conn()
+    row = conn.execute("SELECT * FROM estoque_produtos WHERE id=?", (produto_id,)).fetchone()
+    conn.close(); return dict(row) if row else None
+
+
+def excluir_produto_estoque(produto_id):
+    init_estoque_db(); conn = get_conn()
+    conn.execute("UPDATE estoque_produtos SET ativo=0, atualizado_em=? WHERE id=?", (now_br(), produto_id))
+    conn.commit(); conn.close(); return True
+
+
+def salvar_movimentacao_estoque(dados):
+    init_estoque_db()
+    conn = get_conn(); cur = conn.cursor(); agora = now_br()
+    mov_id = dados.get("id")
+    quantidade = float(dados.get("quantidade") or 0)
+    valor_unitario = float(dados.get("valor_unitario") or 0)
+    valor_total = float(dados.get("valor_total") if dados.get("valor_total") is not None else quantidade * valor_unitario)
+    valores = (
+        int(dados.get("produto_id")), dados.get("tipo_movimento") or "Entrada", dados.get("data_movimento") or "",
+        quantidade, valor_unitario, valor_total, dados.get("pessoa_id"), dados.get("pessoa_nome") or "",
+        dados.get("destino_tipo") or "", dados.get("animal_sbb") or "", dados.get("categoria_animal") or "",
+        dados.get("manejo") or "", dados.get("observacoes") or "",
+    )
+    if mov_id:
+        cur.execute("""
+            UPDATE estoque_movimentacoes
+            SET produto_id=?, tipo_movimento=?, data_movimento=?, quantidade=?, valor_unitario=?, valor_total=?,
+                pessoa_id=?, pessoa_nome=?, destino_tipo=?, animal_sbb=?, categoria_animal=?, manejo=?, observacoes=?, atualizado_em=?
+            WHERE id=?
+        """, valores + (agora, mov_id))
+    else:
+        cur.execute("""
+            INSERT INTO estoque_movimentacoes (
+                produto_id, tipo_movimento, data_movimento, quantidade, valor_unitario, valor_total,
+                pessoa_id, pessoa_nome, destino_tipo, animal_sbb, categoria_animal, manejo, observacoes,
+                status_movimento, criado_em, atualizado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ativo', ?, ?)
+        """, valores + (agora, agora))
+        mov_id = cur.lastrowid
+    conn.commit(); conn.close(); return mov_id
+
+
+def listar_movimentacoes_estoque(filtros=None):
+    init_estoque_db(); filtros = filtros or {}
+    where = ["COALESCE(m.status_movimento,'Ativo') <> 'Excluído'"]; params = []
+    if filtros.get("produto_id"):
+        where.append("m.produto_id=?"); params.append(filtros["produto_id"])
+    if filtros.get("tipo_movimento"):
+        where.append("m.tipo_movimento=?"); params.append(filtros["tipo_movimento"])
+    if filtros.get("categoria"):
+        where.append("p.categoria=?"); params.append(filtros["categoria"])
+    if filtros.get("busca"):
+        where.append("(LOWER(p.nome) LIKE ? OR LOWER(COALESCE(m.observacoes,'')) LIKE ? OR LOWER(COALESCE(m.pessoa_nome,'')) LIKE ?)")
+        termo = f"%{str(filtros['busca']).lower()}%"; params.extend([termo, termo, termo])
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT m.id, m.data_movimento AS Data, m.tipo_movimento AS Movimento, p.nome AS Produto,
+               p.categoria AS Categoria, m.quantidade AS Quantidade, p.unidade AS Unidade,
+               m.valor_unitario AS 'Valor Unitário', m.valor_total AS 'Valor Total',
+               COALESCE(pe.nome_razao, m.pessoa_nome, '') AS Pessoa, m.destino_tipo AS Destino,
+               m.animal_sbb AS Animal, m.categoria_animal AS 'Categoria Animal', m.manejo AS Manejo,
+               m.observacoes AS Observações
+        FROM estoque_movimentacoes m
+        JOIN estoque_produtos p ON p.id = m.produto_id
+        LEFT JOIN pessoas pe ON pe.id = m.pessoa_id
+        WHERE {' AND '.join(where)}
+        ORDER BY m.id DESC
+    """, params).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def excluir_movimentacao_estoque(mov_id):
+    init_estoque_db(); conn = get_conn()
+    conn.execute("UPDATE estoque_movimentacoes SET status_movimento='Excluído', atualizado_em=? WHERE id=?", (now_br(), mov_id))
+    conn.commit(); conn.close(); return True
+
+
+def saldo_estoque_produtos():
+    init_estoque_db(); conn = get_conn()
+    rows = conn.execute("""
+        SELECT p.id, p.nome AS Produto, p.categoria AS Categoria, p.unidade AS Unidade,
+               p.estoque_minimo AS 'Estoque Mínimo', p.data_vencimento AS Vencimento,
+               COALESCE(SUM(CASE
+                    WHEN m.status_movimento='Excluído' THEN 0
+                    WHEN m.tipo_movimento='Entrada' THEN m.quantidade
+                    WHEN m.tipo_movimento='Saída / Consumo' THEN -m.quantidade
+                    WHEN m.tipo_movimento='Ajuste' THEN m.quantidade
+                    ELSE 0 END), 0) AS Saldo,
+               COALESCE(SUM(CASE
+                    WHEN m.status_movimento='Excluído' THEN 0
+                    WHEN m.tipo_movimento='Entrada' THEN m.valor_total
+                    WHEN m.tipo_movimento='Saída / Consumo' THEN -m.valor_total
+                    WHEN m.tipo_movimento='Ajuste' THEN m.valor_total
+                    ELSE 0 END), 0) AS 'Valor em Estoque'
+        FROM estoque_produtos p
+        LEFT JOIN estoque_movimentacoes m ON m.produto_id = p.id
+        WHERE p.ativo=1
+        GROUP BY p.id
+        ORDER BY p.nome
+    """).fetchall()
+    conn.close(); return [dict(r) for r in rows]

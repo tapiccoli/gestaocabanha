@@ -117,3 +117,104 @@ def traduzir_dict_para_linhas(dados, mapa):
         valor = dados.get(campo_tecnico, "") if dados else ""
         linhas.append({"Campo": rotulo, "Valor": valor})
     return linhas
+
+# Mapa oficial informado pelo usuário para a coluna visual "Geração" da aba Pedigree.
+# O número do item continua salvo no banco, mas não aparece no app.
+PEDIGREE_GERACAO_POR_ITEM = {
+    1: "(SBB)",
+    2: "(NOME)",
+    3: "(RP)",
+    4: "(Quinta Geração)",
+    5: "(Quarta Geração)",
+    6: "(Quinta Geração)",
+    7: "(Terceira Geração)",
+    8: "(Quinta Geração)",
+    9: "(Quarta Geração)",
+    10: "(Quinta Geração)",
+    11: "(Segunda Geração)",
+    12: "(Quinta Geração)",
+    13: "(Quarta Geração)",
+    14: "(Quinta Geração)",
+    15: "(Terceira Geração)",
+    16: "(Quinta Geração)",
+    17: "(Quarta Geração)",
+    18: "(Quinta Geração)",
+    19: "(Dados Animal)",
+    21: "(Quinta Geração)",
+    22: "(Quarta Geração)",
+    23: "(Quinta Geração)",
+    24: "(Terceira Geração)",
+    25: "(Quinta Geração)",
+    26: "(Quarta Geração)",
+    27: "(Quinta Geração)",
+    28: "(Segunda Geração)",
+    29: "(Quinta Geração)",
+    30: "(Quarta Geração)",
+    31: "(Quinta Geração)",
+    32: "(Terceira Geração)",
+    33: "(Quinta Geração)",
+    34: "(Quarta Geração)",
+    35: "(Quinta Geração)",
+    36: "(Sexta Geração)",
+    37: "(Sexta Geração)",
+    38: "(Sexta Geração)",
+    39: "(Sexta Geração)",
+    40: "(Sexta Geração)",
+    41: "(Sexta Geração)",
+    42: "(Sexta Geração)",
+    43: "(Sexta Geração)",
+    44: "(Sexta Geração)",
+    45: "(Sexta Geração)",
+    46: "(Sexta Geração)",
+    47: "(Sexta Geração)",
+    48: "(Sexta Geração)",
+    49: "(Sexta Geração)",
+    50: "(Sexta Geração)",
+    51: "(Sexta Geração)",
+    84: "(Sexta Geração)",
+    85: "(Sexta Geração)",
+    86: "(Sexta Geração)",
+    87: "(Sexta Geração)",
+    88: "(Sexta Geração)",
+    89: "(Sexta Geração)",
+    90: "(Sexta Geração)",
+    91: "(Sexta Geração)",
+    92: "(Sexta Geração)",
+    93: "(Sexta Geração)",
+    94: "(Sexta Geração)",
+    95: "(Sexta Geração)",
+    96: "(Sexta Geração)",
+    97: "(Sexta Geração)",
+    98: "(Sexta Geração)",
+    99: "(Sexta Geração)",
+}
+
+PEDIGREE_ITENS_NAO_MOSTRAR = {20}
+
+
+def montar_pedigree_visivel(registros):
+    """Monta a versão limpa da aba Pedigree para exibição no Streamlit.
+
+    O banco mantém numero_item, nome, sbb e pelagem, mas a tela mostra apenas:
+    - Geração: conforme mapa oficial definido pelo usuário
+    - Dados: conteúdo visível do animal/ancestral
+    """
+    linhas = []
+    for registro in registros or []:
+        try:
+            numero_item = int(registro.get("numero_item"))
+        except (TypeError, ValueError):
+            continue
+
+        if numero_item in PEDIGREE_ITENS_NAO_MOSTRAR:
+            continue
+
+        dados = registro.get("texto_completo") or registro.get("nome") or ""
+        if not dados or str(dados).strip().lower() in {"xxx", "xxxx", "none", "nan"}:
+            continue
+
+        linhas.append({
+            "Geração": PEDIGREE_GERACAO_POR_ITEM.get(numero_item, registro.get("bloco") or "Pedigree"),
+            "Dados": dados,
+        })
+    return linhas
