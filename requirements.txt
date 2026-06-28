@@ -2,5 +2,3 @@ streamlit
 selenium
 beautifulsoup4
 pandas
-sqlalchemy
-psycopg2-binary

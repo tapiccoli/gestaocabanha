@@ -1,32 +1,28 @@
-# ERP Cabanha - Cadastro por SBB
+# ERP Cabanha — Cadastro Estrutural
 
-Versão inicial do cadastro de animais integrado à extração ABCCC.
+Versão com cadastro de animais, fila de extração ABCCC e organização inicial do ciclo de vida do animal.
 
-## Recursos desta versão
-
-- Cadastro de múltiplos SBBs com botão `+ Adicionar SBB`.
-- Fila de extração.
-- Selenium em modo oculto/headless.
-- Banco SQLite local.
-- Cadastro completo do animal com seleção por SBB/Nome.
-- Abas de visualização:
-  - Resumo do Cadastro
-  - Principal ABCCC
-  - Méritos
-  - Padreações
-  - Descendentes
-  - Irmãos Paternos/Maternos
-  - Pedigree
-- Estrutura preparada para abrir HTML colorido de 6ª geração por animal.
-
-## Como rodar
+## Rodar localmente
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Observações
+## Alterações desta versão
 
-O Chrome/Chromedriver precisam estar instalados e acessíveis no ambiente.
-Nesta versão, o processamento da fila é manual pelo botão `Processar fila agora`. Depois pode virar serviço contínuo.
+- Adicionado `status_ecossistema` ao animal.
+- Animal vendido e entregue deixa de participar da operação, mas permanece para consulta histórica.
+- Criadas tabelas:
+  - `animal_historico_status`
+  - `animal_parcerias`
+  - `animal_vendas`
+- Criado `repositories/animal_repository.py` para iniciar a separação profissional entre tela e banco.
+- Cadastro manual ampliado com status no ecossistema.
+- Nova aba **Venda / Parceria** dentro da ficha do animal.
+- Nova aba **Histórico** para iniciar a linha do tempo do animal.
+- Categoria de idade recalculada usando sexo, castrado e reprodução ativa.
+
+## Regra importante
+
+Animais não devem ser apagados quando vendidos. Eles devem ser marcados como `Vendido e entregue`, saindo dos manejos e custos futuros, mas mantendo histórico.

@@ -14,8 +14,24 @@ from database import (
     atualizar_campos_cadastro,
     excluir_item_fila,
     limpar_fila_por_status,
+    listar_historico_status,
+    salvar_venda_animal,
+    listar_vendas_animal,
+    salvar_parceria_animal,
+    listar_parcerias_animal,
 )
 from services.extraction_worker import processar_fila
+from utils.campos_abccc import (
+    CAMPOS_TECNICOS_EXCLUIR,
+    CAMPOS_PRINCIPAL,
+    CAMPOS_MERITOS,
+    CAMPOS_HISTORICO,
+    CAMPOS_PADREACOES,
+    CAMPOS_DESCENDENTES,
+    CAMPOS_PEDIGREE_VISIVEIS,
+    traduzir_colunas_df,
+    traduzir_dict_para_linhas,
+)
 
 st.set_page_config(page_title="ERP Cabanha", page_icon="🐴", layout="wide")
 init_db()
@@ -46,35 +62,25 @@ def limpar_vazios(valor):
     return valor
 
 
-def dict_para_dataframe(dados: dict):
+def dict_para_dataframe(dados: dict, mapa_rotulos: dict | None = None):
     itens = []
+    mapa_rotulos = mapa_rotulos or {}
     for k, v in dados.items():
-        # Remove metadados técnicos e colunas Extra_ geradas por sobras do HTML.
-        if k in ["URL"] or str(k).startswith("Extra_"):
+        # Remove metadados técnicos do robô e colunas Extra_ geradas por sobras do HTML.
+        if k in CAMPOS_TECNICOS_EXCLUIR or str(k).startswith("Extra_"):
             continue
-        itens.append({"Campo": k, "Valor": limpar_vazios(v)})
+        itens.append({"Campo": mapa_rotulos.get(k, k), "Valor": limpar_vazios(v)})
     return pd.DataFrame(itens)
 
 
-CAMPOS_PRINCIPAL_VISIVEIS = [
-    "SBB_Pesquisado", "Status_Extracao", "Extraido_Em",
-    "SBB", "Nome", "RP", "Status", "Situacao", "Confirmacao", "Sexo", "Nascimento",
-    "SBB_alternativo", "Animal_com_restricao", "Pelagem", "Registro_de_meritos",
-    "Res_Dominio", "Ult_transferencia", "Castra", "Data_da_morte", "NMGC",
-    "Altura", "Torax", "Canela",
-    "Pai_SBB", "Pai_RP", "Pai_Pelagem", "Pai_Nome",
-    "Mae_SBB", "Mae_RP", "Mae_Pelagem", "Mae_Nome",
-    "Criador_Codigo", "Criador_Nome", "Criador_Afixo", "Criador_Estabelecimento", "Criador_Cidade_estabelecimento",
-    "Proprietario_Codigo", "Proprietario_Nome", "Proprietario_Estabelecimento", "Proprietario_Cidade_estabelecimento",
-]
-
-
 def principal_para_dataframe(dados: dict):
-    ordenado = {campo: dados.get(campo, "") for campo in CAMPOS_PRINCIPAL_VISIVEIS}
-    return dict_para_dataframe(ordenado)
+    linhas = traduzir_dict_para_linhas(dados or {}, CAMPOS_PRINCIPAL)
+    for linha in linhas:
+        linha["Valor"] = limpar_vazios(linha["Valor"])
+    return pd.DataFrame(linhas)
 
-
-def extrair_registros_numerados(dados: dict, prefixo: str, campos: list[str]):
+def extrair_registros_numerados(dados: dict, prefixo: str, campos: list[str], mapa_rotulos: dict | None = None):
+    mapa_rotulos = mapa_rotulos or {}
     padrao = re.compile(rf"^{re.escape(prefixo)}_(\d{{3}})_(.+)$")
     registros = {}
     for chave, valor in dados.items():
@@ -88,7 +94,7 @@ def extrair_registros_numerados(dados: dict, prefixo: str, campos: list[str]):
     for idx in sorted(registros):
         linha = {"Nº": idx}
         for campo in campos:
-            linha[campo] = registros[idx].get(campo, "")
+            linha[mapa_rotulos.get(campo, campo)] = registros[idx].get(campo, "")
         if any(str(v).strip() for k, v in linha.items() if k != "Nº"):
             linhas.append(linha)
     return pd.DataFrame(linhas)
@@ -101,11 +107,12 @@ def mostrar_df(df, vazio="Sem registros extraídos."):
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def opcoes_animais():
-    animais = listar_animais()
+def opcoes_animais(incluir_inativos=True):
+    animais = listar_animais(incluir_inativos=incluir_inativos)
     mapa = {}
     for a in animais:
-        rotulo = f"{a.get('nome') or 'Sem nome'} | SBB {a.get('sbb')} | RP {a.get('rp') or ''}"
+        status = a.get("status_ecossistema") or "Ativo na cabanha"
+        rotulo = f"{a.get('nome') or 'Sem nome'} | SBB {a.get('sbb')} | RP {a.get('rp') or ''} | {status}"
         mapa[rotulo] = a.get("sbb")
     return mapa
 
@@ -236,7 +243,8 @@ with aba_fila:
 
 with aba_animais:
     st.subheader("Selecionar animal cadastrado")
-    mapa = opcoes_animais()
+    incluir_inativos = st.checkbox("Incluir vendidos/entregues e inativos na consulta", value=True)
+    mapa = opcoes_animais(incluir_inativos=incluir_inativos)
     if not mapa:
         st.info("Nenhum animal cadastrado ainda. Cadastre SBBs e processe a fila primeiro.")
         st.stop()
@@ -248,14 +256,15 @@ with aba_animais:
     blocos = buscar_blocos_json(sbb)
     pedigree = buscar_pedigree(sbb)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1: card("Nome", animal.get("nome"))
     with c2: card("SBB / RP", f"{animal.get('sbb')} / {animal.get('rp') or '-'}")
     with c3: card("Nascimento", animal.get("nascimento"))
     with c4: card("Idade", animal.get("idade_calculada"))
     with c5: card("Categoria", animal.get("categoria_calculada") or animal.get("categoria_idade"))
+    with c6: card("Status", animal.get("status_ecossistema") or "Ativo na cabanha")
 
-    tab_resumo, tab_principal, tab_meritos, tab_padreacoes, tab_desc, tab_irmaos, tab_pedigree = st.tabs([
+    tab_resumo, tab_principal, tab_meritos, tab_padreacoes, tab_desc, tab_irmaos, tab_pedigree, tab_venda_parceria, tab_historico = st.tabs([
         "Resumo do Cadastro",
         "Principal ABCCC",
         "Méritos",
@@ -263,38 +272,93 @@ with aba_animais:
         "Descendentes",
         "Irmãos",
         "Pedigree",
+        "Venda / Parceria",
+        "Histórico",
     ])
 
     with tab_resumo:
-        st.markdown("### Dados do sistema")
+        st.markdown("### Dados manuais da cabanha")
         col_a, col_b, col_c = st.columns(3)
+
+        def indice_opcao(opcoes, valor):
+            return opcoes.index(valor) if valor in opcoes else 0
+
         with col_a:
-            classificacao = st.selectbox(
-                "Classificação",
-                ["", "Matriz", "Arreio", "Garanhão", "Xucro"],
-                index=["", "Matriz", "Arreio", "Garanhão", "Xucro"].index(animal.get("classificacao") or "") if (animal.get("classificacao") or "") in ["", "Matriz", "Arreio", "Garanhão", "Xucro"] else 0,
+            op_status_ecossistema = [
+                "Ativo na cabanha",
+                "Em parceria",
+                "Animal de terceiro",
+                "Vendido - aguardando entrega",
+                "Vendido e entregue",
+                "Morto",
+                "Inativo histórico",
+            ]
+            status_ecossistema = st.selectbox(
+                "Status no ecossistema", op_status_ecossistema,
+                index=indice_opcao(op_status_ecossistema, animal.get("status_ecossistema") or "Ativo na cabanha"),
+                help="Vendido e entregue sai de manejo, custos futuros, sanidade e reprodução, mas fica no histórico.",
             )
-            manejo = st.selectbox(
-                "Manejo",
-                ["", "A campo", "Pastagem", "Campo com suplementação", "Cabanha"],
-                index=["", "A campo", "Pastagem", "Campo com suplementação", "Cabanha"].index(animal.get("manejo") or "") if (animal.get("manejo") or "") in ["", "A campo", "Pastagem", "Campo com suplementação", "Cabanha"] else 0,
+            op_tipo_vinculo = ["", "Próprio", "Terceiro", "Parceria"]
+            tipo_vinculo = st.selectbox(
+                "Tipo de vínculo", op_tipo_vinculo,
+                index=indice_opcao(op_tipo_vinculo, animal.get("tipo_vinculo") or ""),
+            )
+            op_origem = ["", "Criação Própria", "Animal Adquirido", "Animal em Parceria", "Animal de Terceiro"]
+            origem = st.selectbox(
+                "Origem", op_origem,
+                index=indice_opcao(op_origem, animal.get("origem") or ""),
+            )
+            op_classificacao = ["", "Matriz", "Arreio", "Garanhão", "Xucro"]
+            classificacao = st.selectbox(
+                "Classificação de uso", op_classificacao,
+                index=indice_opcao(op_classificacao, animal.get("classificacao") or ""),
             )
         with col_b:
-            apto = st.checkbox("Apto à reprodução", value=bool(animal.get("apto_reproducao")))
-            origem = st.selectbox(
-                "Origem",
-                ["", "Adquirido", "Nascido na Propriedade"],
-                index=["", "Adquirido", "Nascido na Propriedade"].index(animal.get("origem") or "") if (animal.get("origem") or "") in ["", "Adquirido", "Nascido na Propriedade"] else 0,
+            op_mansidao = ["", "Xucro", "Manso de baixo", "Domado"]
+            mansidao = st.selectbox(
+                "Mansidão", op_mansidao,
+                index=indice_opcao(op_mansidao, animal.get("mansidao") or ""),
             )
-        with col_c:
+            op_manejo = ["", "A campo", "Pastagem", "Campo com suplementação", "Cabanha", "Doma", "Treinamento", "Central reprodutiva"]
+            manejo = st.selectbox(
+                "Manejo atual", op_manejo,
+                index=indice_opcao(op_manejo, animal.get("manejo") or ""),
+            )
             valor = st.number_input("Valor de aquisição", min_value=0.0, value=float(animal.get("valor_aquisicao") or 0), step=100.0)
-            st.text_input("Pai", value=f"{animal.get('pai_sbb') or ''} - {animal.get('pai_nome') or ''}", disabled=True)
-            st.text_input("Mãe", value=f"{animal.get('mae_sbb') or ''} - {animal.get('mae_nome') or ''}", disabled=True)
+        with col_c:
+            castrado = st.checkbox("Castrado", value=bool(animal.get("castrado")))
+            apto = st.checkbox("Ativo na reprodução", value=bool(animal.get("apto_reproducao")))
+            st.text_input("Categoria calculada", value=animal.get("categoria_calculada") or "", disabled=True)
+
+        observacoes = st.text_area(
+            "Observações do cadastro",
+            value=animal.get("observacoes") or "",
+            placeholder="Comentários de compra, insights de cruzamento, informações de manejo, observações gerais...",
+        )
 
         if st.button("Salvar dados do cadastro", type="primary"):
-            atualizar_campos_cadastro(sbb, classificacao, manejo, apto, origem, valor)
+            atualizar_campos_cadastro(
+                sbb=sbb,
+                status_ecossistema=status_ecossistema,
+                tipo_vinculo=tipo_vinculo,
+                origem=origem,
+                classificacao=classificacao,
+                mansidao=mansidao,
+                manejo=manejo,
+                castrado=castrado,
+                apto_reproducao=apto,
+                valor_aquisicao=valor,
+                observacoes=observacoes,
+            )
             st.success("Cadastro atualizado.")
             st.rerun()
+
+        st.markdown("### Filiação")
+        cf1, cf2 = st.columns(2)
+        with cf1:
+            st.text_input("Pai", value=f"{animal.get('pai_sbb') or ''} - {animal.get('pai_nome') or ''}", disabled=True)
+        with cf2:
+            st.text_input("Mãe", value=f"{animal.get('mae_sbb') or ''} - {animal.get('mae_nome') or ''}", disabled=True)
 
         st.markdown("### Dados principais extraídos")
         resumo = {
@@ -305,10 +369,15 @@ with aba_animais:
             "Pelagem": animal.get("pelagem"),
             "Status": animal.get("status"),
             "Situação": animal.get("situacao"),
-            "Pai_SBB": animal.get("pai_sbb"),
-            "Pai_Nome": animal.get("pai_nome"),
-            "Mae_SBB": animal.get("mae_sbb"),
-            "Mae_Nome": animal.get("mae_nome"),
+            "Status no Ecossistema": animal.get("status_ecossistema") or "Ativo na cabanha",
+            "Tipo de Vínculo": animal.get("tipo_vinculo"),
+            "Origem": animal.get("origem"),
+            "Manejo": animal.get("manejo"),
+            "Mansidão": animal.get("mansidao"),
+            "SBB do Pai": animal.get("pai_sbb"),
+            "Nome do Pai": animal.get("pai_nome"),
+            "SBB da Mãe": animal.get("mae_sbb"),
+            "Nome da Mãe": animal.get("mae_nome"),
         }
         mostrar_df(dict_para_dataframe(resumo))
 
@@ -325,23 +394,23 @@ with aba_animais:
             "P_filho_contrib", "P_neto_contrib", "P_descendentes", "P_proprios", "Numero_merito",
         ]
         resumo_meritos = {c: mer.get(c, "") for c in campos_resumo if c in mer}
-        mostrar_df(dict_para_dataframe(resumo_meritos), "Sem resumo de méritos.")
+        mostrar_df(dict_para_dataframe(resumo_meritos, CAMPOS_MERITOS), "Sem resumo de méritos.")
         st.markdown("### Histórico")
-        hist = extrair_registros_numerados(mer, "Historico", ["Prova", "Classificacao", "Premio", "Ciclo", "Pontos"])
+        hist = extrair_registros_numerados(mer, "Historico", ["Prova", "Classificacao", "Premio", "Ciclo", "Pontos"], CAMPOS_HISTORICO)
         mostrar_df(hist, "Sem histórico de méritos extraído.")
 
     with tab_padreacoes:
         st.markdown("### Padreações")
         pad = blocos.get("Padreacoes", {})
         st.metric("Total de padreações", limpar_vazios(pad.get("Total_Padreacao")) or "0")
-        df_pad = extrair_registros_numerados(pad, "Padreacao", ["SBB", "Nome", "RP", "Inicio_periodo", "Fim_periodo", "OBS"])
+        df_pad = extrair_registros_numerados(pad, "Padreacao", ["SBB", "Nome", "RP", "Inicio_periodo", "Fim_periodo", "OBS"], CAMPOS_PADREACOES)
         mostrar_df(df_pad)
 
     with tab_desc:
         st.markdown("### Descendentes")
         desc = blocos.get("Descendentes", {})
         st.metric("Número de filhos", limpar_vazios(desc.get("Numero_Filhos")) or "0")
-        df_desc = extrair_registros_numerados(desc, "Descendente", ["SBB", "Nome", "RP", "Sexo", "Data_nascimento", "Pelagem", "Situacao", "Pai_SBB", "Pai_Nome"])
+        df_desc = extrair_registros_numerados(desc, "Descendente", ["SBB", "Nome", "RP", "Sexo", "Data_nascimento", "Pelagem", "Situacao", "Pai_SBB", "Pai_Nome", "Mae_SBB", "Mae_Nome"], CAMPOS_DESCENDENTES)
         mostrar_df(df_desc)
 
     with tab_irmaos:
@@ -350,11 +419,11 @@ with aba_animais:
         sub1, sub2 = st.tabs(["Irmãos Paternos", "Irmãos Maternos"])
         with sub1:
             st.metric("Número de irmãos paternos", limpar_vazios(irp.get("Numero_Irmaos_Paternos")) or "0")
-            df_irp = extrair_registros_numerados(irp, "Irmao_Paterno", ["SBB", "Nome", "RP", "Sexo", "Data_nascimento", "Pelagem", "Situacao", "Mae_SBB", "Mae_Nome"])
+            df_irp = extrair_registros_numerados(irp, "Irmao_Paterno", ["SBB", "Nome", "RP", "Sexo", "Data_nascimento", "Pelagem", "Situacao", "Mae_SBB", "Mae_Nome"], CAMPOS_DESCENDENTES)
             mostrar_df(df_irp)
         with sub2:
             st.metric("Número de irmãos maternos", limpar_vazios(irm.get("Numero_Irmaos_Maternos")) or "0")
-            df_irm = extrair_registros_numerados(irm, "Irmao_Materno", ["SBB", "Nome", "RP", "Sexo", "Data_nascimento", "Pelagem", "Situacao", "Pai_SBB", "Pai_Nome"])
+            df_irm = extrair_registros_numerados(irm, "Irmao_Materno", ["SBB", "Nome", "RP", "Sexo", "Data_nascimento", "Pelagem", "Situacao", "Pai_SBB", "Pai_Nome"], CAMPOS_DESCENDENTES)
             mostrar_df(df_irm)
 
     with tab_pedigree:
@@ -365,4 +434,75 @@ with aba_animais:
                 st.warning("Botão reservado. Na próxima etapa conectamos o script do HTML colorido da 6ª geração.")
         with colp2:
             st.caption("A base já está preparada para armazenar o HTML colorido por animal e geração.")
-        mostrar_df(pd.DataFrame(pedigree), "Nenhum pedigree extraído para este animal.")
+        df_pedigree = pd.DataFrame(pedigree)
+        if not df_pedigree.empty:
+            colunas_visiveis = [c for c in ["bloco", "texto_completo"] if c in df_pedigree.columns]
+            df_pedigree = traduzir_colunas_df(df_pedigree[colunas_visiveis], CAMPOS_PEDIGREE_VISIVEIS)
+        mostrar_df(df_pedigree, "Nenhum pedigree extraído para este animal.")
+
+
+    with tab_venda_parceria:
+        st.markdown("### Venda do animal")
+        st.caption("Ao informar data de entrega, o animal muda para 'Vendido e entregue' e sai das listas operacionais futuras, mantendo histórico para consulta.")
+        with st.form("form_venda_animal"):
+            cv1, cv2, cv3 = st.columns(3)
+            with cv1:
+                comprador_nome = st.text_input("Comprador")
+                comprador_cpf = st.text_input("CPF/CNPJ")
+                valor_venda = st.number_input("Valor da venda", min_value=0.0, step=100.0)
+            with cv2:
+                comprador_whatsapp = st.text_input("WhatsApp")
+                comprador_email = st.text_input("E-mail")
+                status_entrega = st.selectbox("Status da entrega", ["", "Aguardando entrega", "Entregue"])
+            with cv3:
+                data_venda = st.text_input("Data da venda", placeholder="DD/MM/AAAA")
+                data_entrega = st.text_input("Data da entrega", placeholder="DD/MM/AAAA")
+                condicao_pagamento = st.text_input("Condição de pagamento", placeholder="Ex: 1+49, plano safra, quitado...")
+            obs_venda = st.text_area("Observações da venda")
+            if st.form_submit_button("Registrar venda"):
+                salvar_venda_animal(
+                    sbb=sbb, comprador_nome=comprador_nome, comprador_cpf=comprador_cpf,
+                    comprador_whatsapp=comprador_whatsapp, comprador_email=comprador_email,
+                    data_venda=data_venda, data_entrega=data_entrega, valor_venda=valor_venda,
+                    condicao_pagamento=condicao_pagamento, status_entrega=status_entrega, observacoes=obs_venda,
+                )
+                st.success("Venda registrada.")
+                st.rerun()
+
+        vendas = listar_vendas_animal(sbb)
+        mostrar_df(pd.DataFrame(vendas), "Nenhuma venda registrada para este animal.")
+
+        st.divider()
+        st.markdown("### Parceria")
+        with st.form("form_parceria_animal"):
+            cp1, cp2, cp3 = st.columns(3)
+            with cp1:
+                parceiro_nome = st.text_input("Parceiro")
+                parceiro_contato = st.text_input("Contato do parceiro")
+                modelo_parceria = st.text_input("Modelo de parceria", placeholder="Ex: 50/50, um ano cada, divisão por produto...")
+            with cp2:
+                percentual_cabanha = st.number_input("% Cabanha", min_value=0.0, max_value=100.0, step=1.0)
+                percentual_parceiro = st.number_input("% Parceiro", min_value=0.0, max_value=100.0, step=1.0)
+                ativo_parceria = st.checkbox("Parceria ativa", value=True)
+            with cp3:
+                data_inicio = st.text_input("Data início", placeholder="DD/MM/AAAA")
+                data_fim = st.text_input("Data fim", placeholder="DD/MM/AAAA")
+            obs_parceria = st.text_area("Observações da parceria")
+            if st.form_submit_button("Registrar parceria"):
+                salvar_parceria_animal(
+                    sbb=sbb, parceiro_nome=parceiro_nome, parceiro_contato=parceiro_contato,
+                    percentual_cabanha=percentual_cabanha, percentual_parceiro=percentual_parceiro,
+                    modelo_parceria=modelo_parceria, data_inicio=data_inicio, data_fim=data_fim,
+                    ativo=ativo_parceria, observacoes=obs_parceria,
+                )
+                st.success("Parceria registrada.")
+                st.rerun()
+
+        parcerias = listar_parcerias_animal(sbb)
+        mostrar_df(pd.DataFrame(parcerias), "Nenhuma parceria registrada para este animal.")
+
+    with tab_historico:
+        st.markdown("### Histórico de status no ecossistema")
+        historico = listar_historico_status(sbb)
+        mostrar_df(pd.DataFrame(historico), "Nenhuma alteração de status registrada.")
+        st.info("Nesta aba ficará a linha do tempo do animal. Por enquanto começamos pelo histórico de status; depois sanidade, reprodução, morfologia e financeiro também alimentarão esta linha do tempo.")
