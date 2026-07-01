@@ -329,6 +329,10 @@ def init_db():
         init_sanidade_db()
     except NameError:
         pass
+    try:
+        init_reproducao_db()
+    except NameError:
+        pass
 
 
 def inserir_fila(sbb: str):
@@ -1496,3 +1500,370 @@ def alertas_sanidade(dias=30):
         ORDER BY e.proxima_dose
     """).fetchall()
     conn.close(); return [dict(r) for r in rows]
+
+# ============================================================
+# EVENTOS GERAIS / LINHA DO TEMPO
+# ============================================================
+def init_eventos_db():
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS eventos_gerais (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        data_evento TEXT,
+        tipo_evento TEXT NOT NULL,
+        modulo_origem TEXT,
+        entidade_tipo TEXT,
+        entidade_id TEXT,
+        animal_sbb TEXT,
+        pessoa_id INTEGER,
+        produto_id INTEGER,
+        lancamento_financeiro_id INTEGER,
+        movimentacao_estoque_id INTEGER,
+        sanidade_evento_id INTEGER,
+        descricao TEXT,
+        observacoes TEXT,
+        status_evento TEXT DEFAULT 'Ativo',
+        criado_em TEXT,
+        atualizado_em TEXT
+    )
+    """)
+    conn.commit(); conn.close()
+
+
+def registrar_evento_geral(dados):
+    init_eventos_db()
+    conn = get_conn(); cur = conn.cursor(); agora = now_br()
+    cur.execute("""
+        INSERT INTO eventos_gerais (
+            data_evento, tipo_evento, modulo_origem, entidade_tipo, entidade_id,
+            animal_sbb, pessoa_id, produto_id, lancamento_financeiro_id,
+            movimentacao_estoque_id, sanidade_evento_id, descricao, observacoes,
+            status_evento, criado_em, atualizado_em
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ativo', ?, ?)
+    """, (
+        dados.get("data_evento") or "",
+        dados.get("tipo_evento") or "Evento",
+        dados.get("modulo_origem") or "",
+        dados.get("entidade_tipo") or "",
+        str(dados.get("entidade_id") or ""),
+        dados.get("animal_sbb") or "",
+        dados.get("pessoa_id"),
+        dados.get("produto_id"),
+        dados.get("lancamento_financeiro_id"),
+        dados.get("movimentacao_estoque_id"),
+        dados.get("sanidade_evento_id"),
+        dados.get("descricao") or "",
+        dados.get("observacoes") or "",
+        agora,
+        agora,
+    ))
+    evento_id = cur.lastrowid
+    conn.commit(); conn.close(); return evento_id
+
+
+def listar_eventos_gerais(filtros=None):
+    init_eventos_db(); filtros = filtros or {}
+    where = ["COALESCE(status_evento,'Ativo') <> 'Excluído'"]; params = []
+    if filtros.get("animal_sbb"):
+        where.append("animal_sbb=?"); params.append(filtros["animal_sbb"])
+    if filtros.get("modulo_origem"):
+        where.append("modulo_origem=?"); params.append(filtros["modulo_origem"])
+    if filtros.get("tipo_evento"):
+        where.append("tipo_evento=?"); params.append(filtros["tipo_evento"])
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT * FROM eventos_gerais
+        WHERE {' AND '.join(where)}
+        ORDER BY id DESC
+    """, params).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def excluir_evento_geral(evento_id):
+    init_eventos_db(); conn = get_conn()
+    conn.execute("UPDATE eventos_gerais SET status_evento='Excluído', atualizado_em=? WHERE id=?", (now_br(), evento_id))
+    conn.commit(); conn.close(); return True
+
+# ============================================================
+# REPRODUÇÃO
+# ============================================================
+TEMPORADA_STATUS_PADRAO = ["Aberta", "Encerrada", "Arquivada"]
+TIPOS_COBERTURA_PADRAO = ["Monta natural", "Sêmen fresco", "Sêmen congelado", "Transferência de embrião"]
+STATUS_REPRODUTIVO_PADRAO = ["Planejada", "Em ciclo", "Inseminada/Coberta", "Prenha", "Parida", "Falhada", "Vazia", "Cancelada"]
+TIPOS_DIAGNOSTICO_PADRAO = ["Positivo", "Negativo", "Reabsorção", "Aguardando", "Indeterminado"]
+
+
+def init_reproducao_db():
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reproducao_temporadas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        data_inicio TEXT,
+        data_fim TEXT,
+        status TEXT DEFAULT 'Aberta',
+        observacoes TEXT,
+        ativo INTEGER DEFAULT 1,
+        criado_em TEXT,
+        atualizado_em TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reproducao_planejamentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        temporada_id INTEGER,
+        temporada_nome TEXT,
+        matriz_sbb TEXT NOT NULL,
+        matriz_nome TEXT,
+        garanhao_sbb TEXT,
+        garanhao_nome TEXT,
+        tipo_cobertura TEXT,
+        central_pessoa_id INTEGER,
+        central_nome TEXT,
+        veterinario_pessoa_id INTEGER,
+        veterinario_nome TEXT,
+        transportador_pessoa_id INTEGER,
+        transportador_nome TEXT,
+        status_reprodutivo TEXT DEFAULT 'Planejada',
+        custo_previsto REAL DEFAULT 0,
+        observacoes TEXT,
+        ativo INTEGER DEFAULT 1,
+        criado_em TEXT,
+        atualizado_em TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reproducao_eventos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        planejamento_id INTEGER,
+        temporada_id INTEGER,
+        temporada_nome TEXT,
+        matriz_sbb TEXT NOT NULL,
+        matriz_nome TEXT,
+        garanhao_sbb TEXT,
+        garanhao_nome TEXT,
+        tipo_evento TEXT,
+        data_evento TEXT,
+        tipo_cobertura TEXT,
+        diagnostico TEXT,
+        status_resultante TEXT,
+        veterinario_pessoa_id INTEGER,
+        veterinario_nome TEXT,
+        produto_id INTEGER,
+        produto_nome TEXT,
+        quantidade_produto REAL DEFAULT 0,
+        unidade_produto TEXT,
+        custo_total REAL DEFAULT 0,
+        centro_custo TEXT,
+        atividade TEXT,
+        observacoes TEXT,
+        lancamento_financeiro_id INTEGER,
+        movimentacao_estoque_id INTEGER,
+        status_evento TEXT DEFAULT 'Ativo',
+        criado_em TEXT,
+        atualizado_em TEXT
+    )
+    """)
+    conn.commit(); conn.close()
+
+
+def matrizes_ativas_reproducao():
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM animais
+        WHERE COALESCE(apto_reproducao,0)=1
+          AND UPPER(COALESCE(sexo,'')) LIKE 'F%'
+          AND COALESCE(status_ecossistema,'Ativo na cabanha') NOT IN ('Vendido e entregue','Morto','Inativo histórico')
+        ORDER BY nome, sbb
+    """).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def garanhoes_ativos_reproducao():
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM animais
+        WHERE COALESCE(apto_reproducao,0)=1
+          AND UPPER(COALESCE(sexo,'')) NOT LIKE 'F%'
+          AND COALESCE(castrado,0)=0
+          AND COALESCE(status_ecossistema,'Ativo na cabanha') NOT IN ('Vendido e entregue','Morto','Inativo histórico')
+        ORDER BY nome, sbb
+    """).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def salvar_temporada_reprodutiva(dados):
+    init_reproducao_db(); conn = get_conn(); cur = conn.cursor(); agora = now_br()
+    temporada_id = dados.get("id")
+    valores = (dados.get("nome") or "", dados.get("data_inicio") or "", dados.get("data_fim") or "", dados.get("status") or "Aberta", dados.get("observacoes") or "")
+    if temporada_id:
+        cur.execute("""
+            UPDATE reproducao_temporadas SET nome=?, data_inicio=?, data_fim=?, status=?, observacoes=?, atualizado_em=? WHERE id=?
+        """, valores + (agora, temporada_id))
+    else:
+        cur.execute("""
+            INSERT INTO reproducao_temporadas (nome, data_inicio, data_fim, status, observacoes, ativo, criado_em, atualizado_em)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        """, valores + (agora, agora))
+        temporada_id = cur.lastrowid
+    conn.commit(); conn.close(); return temporada_id
+
+
+def listar_temporadas_reprodutivas(incluir_inativas=True):
+    init_reproducao_db(); conn = get_conn()
+    where = "" if incluir_inativas else "WHERE COALESCE(ativo,1)=1 AND COALESCE(status,'Aberta') <> 'Arquivada'"
+    rows = conn.execute(f"SELECT * FROM reproducao_temporadas {where} ORDER BY id DESC").fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def buscar_temporada_reprodutiva(temporada_id):
+    init_reproducao_db(); conn = get_conn()
+    row = conn.execute("SELECT * FROM reproducao_temporadas WHERE id=?", (temporada_id,)).fetchone()
+    conn.close(); return dict(row) if row else None
+
+
+def excluir_temporada_reprodutiva(temporada_id):
+    init_reproducao_db(); conn = get_conn()
+    conn.execute("UPDATE reproducao_temporadas SET ativo=0, status='Arquivada', atualizado_em=? WHERE id=?", (now_br(), temporada_id))
+    conn.commit(); conn.close(); return True
+
+
+def salvar_planejamento_reprodutivo(dados):
+    init_reproducao_db(); conn = get_conn(); cur = conn.cursor(); agora = now_br()
+    planejamento_id = dados.get("id")
+    valores = (
+        dados.get("temporada_id"), dados.get("temporada_nome") or "", dados.get("matriz_sbb") or "", dados.get("matriz_nome") or "",
+        dados.get("garanhao_sbb") or "", dados.get("garanhao_nome") or "", dados.get("tipo_cobertura") or "",
+        dados.get("central_pessoa_id"), dados.get("central_nome") or "", dados.get("veterinario_pessoa_id"), dados.get("veterinario_nome") or "",
+        dados.get("transportador_pessoa_id"), dados.get("transportador_nome") or "", dados.get("status_reprodutivo") or "Planejada",
+        float(dados.get("custo_previsto") or 0), dados.get("observacoes") or "",
+    )
+    if planejamento_id:
+        cur.execute("""
+            UPDATE reproducao_planejamentos
+            SET temporada_id=?, temporada_nome=?, matriz_sbb=?, matriz_nome=?, garanhao_sbb=?, garanhao_nome=?, tipo_cobertura=?,
+                central_pessoa_id=?, central_nome=?, veterinario_pessoa_id=?, veterinario_nome=?, transportador_pessoa_id=?, transportador_nome=?,
+                status_reprodutivo=?, custo_previsto=?, observacoes=?, atualizado_em=?
+            WHERE id=?
+        """, valores + (agora, planejamento_id))
+    else:
+        cur.execute("""
+            INSERT INTO reproducao_planejamentos (
+                temporada_id, temporada_nome, matriz_sbb, matriz_nome, garanhao_sbb, garanhao_nome, tipo_cobertura,
+                central_pessoa_id, central_nome, veterinario_pessoa_id, veterinario_nome, transportador_pessoa_id, transportador_nome,
+                status_reprodutivo, custo_previsto, observacoes, ativo, criado_em, atualizado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """, valores + (agora, agora))
+        planejamento_id = cur.lastrowid
+    conn.commit(); conn.close(); return planejamento_id
+
+
+def listar_planejamentos_reprodutivos(filtros=None):
+    init_reproducao_db(); filtros = filtros or {}
+    where = ["COALESCE(ativo,1)=1"]; params = []
+    if filtros.get("temporada_id"):
+        where.append("temporada_id=?"); params.append(filtros["temporada_id"])
+    if filtros.get("status_reprodutivo"):
+        where.append("status_reprodutivo=?"); params.append(filtros["status_reprodutivo"])
+    if filtros.get("matriz_sbb"):
+        where.append("matriz_sbb=?"); params.append(filtros["matriz_sbb"])
+    if filtros.get("busca"):
+        termo = f"%{str(filtros['busca']).lower()}%"
+        where.append("(LOWER(COALESCE(matriz_nome,'')) LIKE ? OR LOWER(COALESCE(matriz_sbb,'')) LIKE ? OR LOWER(COALESCE(garanhao_nome,'')) LIKE ? OR LOWER(COALESCE(garanhao_sbb,'')) LIKE ?)")
+        params.extend([termo, termo, termo, termo])
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT id, temporada_nome AS Temporada, matriz_nome AS Matriz, matriz_sbb AS 'SBB Matriz',
+               garanhao_nome AS Garanhão, garanhao_sbb AS 'SBB Garanhão', tipo_cobertura AS 'Tipo',
+               status_reprodutivo AS Status, veterinario_nome AS Veterinário, central_nome AS Central,
+               custo_previsto AS 'Custo Previsto', observacoes AS Observações
+        FROM reproducao_planejamentos
+        WHERE {' AND '.join(where)}
+        ORDER BY id DESC
+    """, params).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def buscar_planejamento_reprodutivo(planejamento_id):
+    init_reproducao_db(); conn = get_conn()
+    row = conn.execute("SELECT * FROM reproducao_planejamentos WHERE id=?", (planejamento_id,)).fetchone()
+    conn.close(); return dict(row) if row else None
+
+
+def excluir_planejamento_reprodutivo(planejamento_id):
+    init_reproducao_db(); conn = get_conn()
+    conn.execute("UPDATE reproducao_planejamentos SET ativo=0, atualizado_em=? WHERE id=?", (now_br(), planejamento_id))
+    conn.commit(); conn.close(); return True
+
+
+def salvar_evento_reprodutivo(dados):
+    init_reproducao_db(); conn = get_conn(); cur = conn.cursor(); agora = now_br()
+    evento_id = dados.get("id")
+    valores = (
+        dados.get("planejamento_id"), dados.get("temporada_id"), dados.get("temporada_nome") or "", dados.get("matriz_sbb") or "", dados.get("matriz_nome") or "",
+        dados.get("garanhao_sbb") or "", dados.get("garanhao_nome") or "", dados.get("tipo_evento") or "", dados.get("data_evento") or "",
+        dados.get("tipo_cobertura") or "", dados.get("diagnostico") or "", dados.get("status_resultante") or "", dados.get("veterinario_pessoa_id"),
+        dados.get("veterinario_nome") or "", dados.get("produto_id"), dados.get("produto_nome") or "", float(dados.get("quantidade_produto") or 0),
+        dados.get("unidade_produto") or "", float(dados.get("custo_total") or 0), dados.get("centro_custo") or "", dados.get("atividade") or "",
+        dados.get("observacoes") or "", dados.get("lancamento_financeiro_id"), dados.get("movimentacao_estoque_id"),
+    )
+    if evento_id:
+        cur.execute("""
+            UPDATE reproducao_eventos
+            SET planejamento_id=?, temporada_id=?, temporada_nome=?, matriz_sbb=?, matriz_nome=?, garanhao_sbb=?, garanhao_nome=?, tipo_evento=?, data_evento=?,
+                tipo_cobertura=?, diagnostico=?, status_resultante=?, veterinario_pessoa_id=?, veterinario_nome=?, produto_id=?, produto_nome=?, quantidade_produto=?,
+                unidade_produto=?, custo_total=?, centro_custo=?, atividade=?, observacoes=?, lancamento_financeiro_id=?, movimentacao_estoque_id=?, atualizado_em=?
+            WHERE id=?
+        """, valores + (agora, evento_id))
+    else:
+        cur.execute("""
+            INSERT INTO reproducao_eventos (
+                planejamento_id, temporada_id, temporada_nome, matriz_sbb, matriz_nome, garanhao_sbb, garanhao_nome, tipo_evento, data_evento,
+                tipo_cobertura, diagnostico, status_resultante, veterinario_pessoa_id, veterinario_nome, produto_id, produto_nome, quantidade_produto,
+                unidade_produto, custo_total, centro_custo, atividade, observacoes, lancamento_financeiro_id, movimentacao_estoque_id,
+                status_evento, criado_em, atualizado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ativo', ?, ?)
+        """, valores + (agora, agora))
+        evento_id = cur.lastrowid
+
+    # Atualiza o planejamento e o cadastro da matriz quando o evento indica novo status.
+    status_resultante = dados.get("status_resultante") or ""
+    planejamento_id = dados.get("planejamento_id")
+    matriz_sbb = dados.get("matriz_sbb") or ""
+    temporada_nome = dados.get("temporada_nome") or ""
+    if planejamento_id and status_resultante:
+        cur.execute("UPDATE reproducao_planejamentos SET status_reprodutivo=?, atualizado_em=? WHERE id=?", (status_resultante, agora, planejamento_id))
+    if matriz_sbb and status_resultante:
+        obs = f"Status reprodutivo: {status_resultante}"
+        if status_resultante == "Prenha" and temporada_nome:
+            obs = f"Prenha - Temporada {temporada_nome}"
+        cur.execute("UPDATE animais SET observacoes=TRIM(COALESCE(observacoes,'') || ?), atualizado_em=? WHERE sbb=?", (f"\n{agora}: {obs}", agora, matriz_sbb))
+    conn.commit(); conn.close(); return evento_id
+
+
+def listar_eventos_reprodutivos(filtros=None):
+    init_reproducao_db(); filtros = filtros or {}
+    where = ["COALESCE(status_evento,'Ativo') <> 'Excluído'"]; params = []
+    if filtros.get("temporada_id"):
+        where.append("temporada_id=?"); params.append(filtros["temporada_id"])
+    if filtros.get("matriz_sbb"):
+        where.append("matriz_sbb=?"); params.append(filtros["matriz_sbb"])
+    if filtros.get("tipo_evento"):
+        where.append("tipo_evento=?"); params.append(filtros["tipo_evento"])
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT id, data_evento AS Data, temporada_nome AS Temporada, tipo_evento AS Evento,
+               matriz_nome AS Matriz, matriz_sbb AS 'SBB Matriz', garanhao_nome AS Garanhão,
+               tipo_cobertura AS 'Tipo Cobertura', diagnostico AS Diagnóstico, status_resultante AS Status,
+               veterinario_nome AS Veterinário, custo_total AS Custo, observacoes AS Observações
+        FROM reproducao_eventos
+        WHERE {' AND '.join(where)}
+        ORDER BY id DESC
+    """, params).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def excluir_evento_reprodutivo(evento_id):
+    init_reproducao_db(); conn = get_conn()
+    conn.execute("UPDATE reproducao_eventos SET status_evento='Excluído', atualizado_em=? WHERE id=?", (now_br(), evento_id))
+    conn.commit(); conn.close(); return True

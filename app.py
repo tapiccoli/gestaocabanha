@@ -26,6 +26,10 @@ from repositories.pessoa_repository import PessoaRepository
 from repositories.financeiro_repository import FinanceiroRepository
 from repositories.estoque_repository import EstoqueRepository
 from repositories.sanidade_repository import SanidadeRepository
+from repositories.reproducao_repository import ReproducaoRepository
+from repositories.evento_repository import EventoRepository
+from components.entity_selector import cadastro_rapido_pessoa, cadastro_rapido_produto, selectbox_com_cadastro_rapido
+from components.event_timeline import render_timeline
 from utils.campos_abccc import (
     CAMPOS_TECNICOS_EXCLUIR,
     CAMPOS_PRINCIPAL,
@@ -41,6 +45,8 @@ from utils.campos_abccc import (
 
 st.set_page_config(page_title="ERP Cabanha", page_icon="🐴", layout="wide")
 init_db()
+EventoRepository.init()
+ReproducaoRepository.init()
 
 st.markdown(
     """
@@ -1285,175 +1291,214 @@ def render_modulo_sanidade():
     with tab_novo:
         if st.session_state.get("sanidade_msg"):
             st.success(st.session_state.pop("sanidade_msg"))
+
         versao = st.session_state.get("sanidade_form_version", 0)
-        with st.form(f"form_sanidade_{versao}"):
-            st.markdown("### Dados do evento")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                tipo_evento = st.selectbox("Tipo de evento *", SanidadeRepository.TIPOS)
-                data_evento = st.text_input("Data do evento *", placeholder="DD/MM/AAAA")
-                protocolo = st.selectbox("Protocolo", SanidadeRepository.PROTOCOLOS)
-            with c2:
-                produto_rotulo = st.selectbox("Produto do estoque", list(produtos_op.keys()))
-                produto_id = produtos_op.get(produto_rotulo)
-                produto_nome = produto_rotulo.split(" | ")[0] if produto_rotulo else ""
-                principio_ativo = st.text_input("Princípio ativo")
-                nome_comercial = st.text_input("Nome comercial", value=produto_nome)
-            with c3:
-                lote = st.text_input("Lote")
-                via_aplicacao = st.selectbox("Via de aplicação", SanidadeRepository.VIAS)
-                proxima_dose = st.text_input("Próxima dose / reforço", placeholder="DD/MM/AAAA")
+        prefix = f"san_{versao}"
 
-            st.markdown("### Animais atendidos")
-            d1, d2 = st.columns([1, 2])
-            with d1:
-                destino_tipo = st.selectbox("Aplicar para", ["", "Animal específico", "Vários animais", "Categoria", "Manejo", "Todos os Animais"])
-            with d2:
-                animal_sbb = ""; animais_sbb = []; categoria_animal = ""; manejo = ""
-                if destino_tipo == "Animal específico":
-                    animal_rotulo = st.selectbox("Animal", list(animais_op.keys()))
-                    animal_sbb = animais_op.get(animal_rotulo, "")
-                elif destino_tipo == "Vários animais":
-                    labels = [k for k in animais_op.keys() if k]
-                    escolhidos = st.multiselect("Animais", labels)
-                    animais_sbb = [animais_op[x] for x in escolhidos]
-                elif destino_tipo == "Categoria":
-                    categoria_animal = st.selectbox("Categoria animal", _opcoes_categorias_animais())
-                elif destino_tipo == "Manejo":
-                    manejo = st.selectbox("Manejo", _opcoes_manejos_animais())
-                elif destino_tipo == "Todos os Animais":
-                    st.info("O evento será aplicado a todos os animais ativos na cabanha.")
+        st.markdown("### Dados do evento")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            tipo_evento = st.selectbox("Tipo de evento *", SanidadeRepository.TIPOS, key=f"{prefix}_tipo_evento")
+            data_evento = st.text_input("Data do evento *", placeholder="DD/MM/AAAA", key=f"{prefix}_data_evento")
+            protocolo = st.selectbox("Protocolo", SanidadeRepository.PROTOCOLOS, key=f"{prefix}_protocolo")
+        with c2:
+            produto_valor, produto_rotulo = selectbox_com_cadastro_rapido(
+                "Produto do estoque",
+                produtos_op,
+                key=f"{prefix}_produto",
+                tipo="produto",
+                categoria_padrao="Medicamento",
+                help_text="A primeira opção permite cadastrar um novo produto sem sair deste evento.",
+            )
+            produto_id = produto_valor
+            produto_nome = produto_rotulo.split(" | ")[0] if produto_rotulo and not produto_rotulo.startswith("➕") else ""
+            principio_ativo = st.text_input("Princípio ativo", key=f"{prefix}_principio")
+            nome_comercial = st.text_input("Nome comercial", value=produto_nome, key=f"{prefix}_nome_comercial")
+        with c3:
+            lote = st.text_input("Lote", key=f"{prefix}_lote")
+            via_aplicacao = st.selectbox("Via de aplicação", SanidadeRepository.VIAS, key=f"{prefix}_via")
+            proxima_dose = st.text_input("Próxima dose / reforço", placeholder="DD/MM/AAAA", key=f"{prefix}_prox")
 
-            animais_sel = _animais_por_destino_sanidade(destino_tipo, animal_sbb, animais_sbb, categoria_animal, manejo)
-            if destino_tipo:
-                st.caption(f"Animais selecionados para o evento: {len(animais_sel)}")
+        st.markdown("### Animais atendidos")
+        d1, d2 = st.columns([1, 2])
+        with d1:
+            destino_tipo = st.selectbox("Aplicar para", ["", "Animal específico", "Vários animais", "Categoria", "Manejo", "Todos os Animais"], key=f"{prefix}_destino")
+        with d2:
+            animal_sbb = ""; animais_sbb = []; categoria_animal = ""; manejo = ""
+            if destino_tipo == "Animal específico":
+                animal_rotulo = st.selectbox("Animal", list(animais_op.keys()), key=f"{prefix}_animal")
+                animal_sbb = animais_op.get(animal_rotulo, "")
+            elif destino_tipo == "Vários animais":
+                labels = [k for k in animais_op.keys() if k]
+                escolhidos = st.multiselect("Animais", labels, key=f"{prefix}_animais_multi")
+                animais_sbb = [animais_op[x] for x in escolhidos]
+            elif destino_tipo == "Categoria":
+                categoria_animal = st.selectbox("Categoria animal", _opcoes_categorias_animais(), key=f"{prefix}_categoria")
+            elif destino_tipo == "Manejo":
+                manejo = st.selectbox("Manejo", _opcoes_manejos_animais(), key=f"{prefix}_manejo")
+            elif destino_tipo == "Todos os Animais":
+                st.info("O evento será aplicado a todos os animais ativos na cabanha.")
 
-            st.markdown("### Quantidade, custo e responsável")
-            q1, q2, q3 = st.columns(3)
-            with q1:
-                quantidade_por_animal = st.number_input("Quantidade por animal", min_value=0.0, step=1.0)
-                unidade = st.selectbox("Unidade", [""] + EstoqueRepository.UNIDADES)
-                valor_unitario = st.number_input("Valor unitário do produto", min_value=0.0, step=1.0)
-            with q2:
-                pessoa_rotulo = st.selectbox("Veterinário / responsável", list(pessoas_op.keys()))
-                veterinario_pessoa_id, veterinario_nome = pessoas_op[pessoa_rotulo]
-                local_atendimento = st.text_input("Local")
-                motivo = st.text_input("Motivo")
-            with q3:
-                honorarios = st.number_input("Honorários", min_value=0.0, step=1.0)
-                outros_custos = st.number_input("Outros custos", min_value=0.0, step=1.0)
-                centro_custo = st.selectbox("Centro de custo", [""] + FinanceiroRepository.CENTROS_CUSTO)
-                atividade = st.selectbox("Atividade", [""] + FinanceiroRepository.ATIVIDADES)
+        animais_sel = _animais_por_destino_sanidade(destino_tipo, animal_sbb, animais_sbb, categoria_animal, manejo)
+        if destino_tipo:
+            st.caption(f"Animais selecionados para o evento: {len(animais_sel)}")
 
-            quantidade_total = quantidade_por_animal * len(animais_sel)
-            valor_produtos = quantidade_total * valor_unitario
-            custo_total = valor_produtos + honorarios + outros_custos
-            st.info(f"Quantidade total: {quantidade_total:g} {unidade or ''} | Custo total estimado: {_formatar_moeda(custo_total)} | Custo médio por animal: {_formatar_moeda(custo_total / len(animais_sel) if animais_sel else 0)}")
+        st.markdown("### Quantidade, custo e responsável")
+        q1, q2, q3 = st.columns(3)
+        with q1:
+            quantidade_por_animal = st.number_input("Quantidade por animal", min_value=0.0, step=1.0, key=f"{prefix}_qtd")
+            unidade = st.selectbox("Unidade", [""] + EstoqueRepository.UNIDADES, key=f"{prefix}_un")
+            valor_unitario = st.number_input("Valor unitário do produto", min_value=0.0, step=1.0, key=f"{prefix}_vl_unit")
+        with q2:
+            pessoa_valor, pessoa_rotulo = selectbox_com_cadastro_rapido(
+                "Veterinário / responsável",
+                pessoas_op,
+                key=f"{prefix}_pessoa",
+                tipo="pessoa",
+                papel_padrao="Veterinário",
+                help_text="A primeira opção permite cadastrar uma nova pessoa sem sair deste evento.",
+            )
+            veterinario_pessoa_id, veterinario_nome = pessoa_valor if pessoa_valor else (None, "")
+            local_atendimento = st.text_input("Local", key=f"{prefix}_local")
+            motivo = st.text_input("Motivo", key=f"{prefix}_motivo")
+        with q3:
+            honorarios = st.number_input("Honorários", min_value=0.0, step=1.0, key=f"{prefix}_hon")
+            outros_custos = st.number_input("Outros custos", min_value=0.0, step=1.0, key=f"{prefix}_outros")
+            centro_custo = st.selectbox("Centro de custo", [""] + FinanceiroRepository.CENTROS_CUSTO, key=f"{prefix}_cc")
+            atividade = st.selectbox("Atividade", [""] + FinanceiroRepository.ATIVIDADES, key=f"{prefix}_ativ")
 
-            gerar_baixa_estoque = st.checkbox("Gerar saída automática do estoque", value=bool(produto_id and quantidade_total > 0))
-            gerar_financeiro = st.checkbox("Gerar lançamento financeiro automaticamente", value=bool(custo_total > 0))
-            observacoes = st.text_area("Observações")
-            salvar = st.form_submit_button("Salvar evento sanitário", type="primary", use_container_width=True)
+        quantidade_total = quantidade_por_animal * len(animais_sel)
+        valor_produtos = quantidade_total * valor_unitario
+        custo_total = valor_produtos + honorarios + outros_custos
+        st.info(f"Quantidade total: {quantidade_total:g} {unidade or ''} | Custo total estimado: {_formatar_moeda(custo_total)} | Custo médio por animal: {_formatar_moeda(custo_total / len(animais_sel) if animais_sel else 0)}")
 
-            if salvar:
-                if not data_evento.strip():
-                    st.warning("Informe a data do evento.")
-                elif not destino_tipo:
-                    st.warning("Informe para quais animais este evento será aplicado.")
-                elif not animais_sel:
-                    st.warning("Nenhum animal foi selecionado para este evento.")
-                elif gerar_baixa_estoque and not produto_id:
-                    st.warning("Para gerar baixa de estoque, selecione um produto do estoque.")
-                else:
-                    animais_payload = []
-                    custo_rateado = custo_total / len(animais_sel) if animais_sel else 0
-                    for a in animais_sel:
-                        animais_payload.append({
-                            "animal_sbb": a.get("sbb"),
-                            "animal_nome": a.get("nome") or "",
-                            "quantidade": quantidade_por_animal,
-                            "custo_rateado": custo_rateado,
-                        })
-                    evento_id = SanidadeRepository.salvar_evento({
-                        "tipo_evento": tipo_evento,
-                        "data_evento": data_evento,
-                        "protocolo": protocolo,
-                        "principio_ativo": principio_ativo,
-                        "nome_comercial": nome_comercial,
-                        "lote": lote,
-                        "via_aplicacao": via_aplicacao,
+        gerar_baixa_estoque = st.checkbox("Gerar saída automática do estoque", value=bool(produto_id and quantidade_total > 0), key=f"{prefix}_baixa")
+        gerar_financeiro = st.checkbox("Gerar lançamento financeiro automaticamente", value=bool(custo_total > 0), key=f"{prefix}_fin")
+        observacoes = st.text_area("Observações", key=f"{prefix}_obs")
+
+        col_salvar, col_limpar = st.columns(2)
+        salvar = col_salvar.button("Salvar evento sanitário", type="primary", use_container_width=True, key=f"{prefix}_salvar")
+        limpar = col_limpar.button("Limpar / Novo evento", use_container_width=True, key=f"{prefix}_limpar")
+        if limpar:
+            st.session_state["sanidade_form_version"] = versao + 1
+            st.session_state["sanidade_msg"] = "Formulário limpo para novo evento."
+            st.rerun()
+
+        if salvar:
+            if not data_evento.strip():
+                st.warning("Informe a data do evento.")
+            elif not destino_tipo:
+                st.warning("Informe para quais animais este evento será aplicado.")
+            elif not animais_sel:
+                st.warning("Nenhum animal foi selecionado para este evento.")
+            elif gerar_baixa_estoque and not produto_id:
+                st.warning("Para gerar baixa de estoque, selecione um produto do estoque.")
+            else:
+                animais_payload = []
+                custo_rateado = custo_total / len(animais_sel) if animais_sel else 0
+                for a in animais_sel:
+                    animais_payload.append({
+                        "animal_sbb": a.get("sbb"),
+                        "animal_nome": a.get("nome") or "",
+                        "quantidade": quantidade_por_animal,
+                        "custo_rateado": custo_rateado,
+                    })
+                evento_id = SanidadeRepository.salvar_evento({
+                    "tipo_evento": tipo_evento,
+                    "data_evento": data_evento,
+                    "protocolo": protocolo,
+                    "principio_ativo": principio_ativo,
+                    "nome_comercial": nome_comercial,
+                    "lote": lote,
+                    "via_aplicacao": via_aplicacao,
+                    "produto_id": produto_id,
+                    "produto_nome": produto_nome or nome_comercial,
+                    "quantidade_total": quantidade_total,
+                    "unidade": unidade,
+                    "valor_produtos": valor_produtos,
+                    "veterinario_pessoa_id": veterinario_pessoa_id,
+                    "veterinario_nome": veterinario_nome,
+                    "local_atendimento": local_atendimento,
+                    "motivo": motivo,
+                    "honorarios": honorarios,
+                    "outros_custos": outros_custos,
+                    "custo_total": custo_total,
+                    "proxima_dose": proxima_dose,
+                    "centro_custo": centro_custo,
+                    "atividade": atividade,
+                    "gerar_financeiro": gerar_financeiro,
+                    "observacoes": observacoes,
+                }, animais_payload)
+
+                mov_id = None
+                if gerar_baixa_estoque and produto_id and quantidade_total > 0:
+                    mov_id = EstoqueRepository.salvar_movimentacao({
                         "produto_id": produto_id,
-                        "produto_nome": produto_nome or nome_comercial,
-                        "quantidade_total": quantidade_total,
-                        "unidade": unidade,
-                        "valor_produtos": valor_produtos,
-                        "veterinario_pessoa_id": veterinario_pessoa_id,
-                        "veterinario_nome": veterinario_nome,
-                        "local_atendimento": local_atendimento,
-                        "motivo": motivo,
-                        "honorarios": honorarios,
-                        "outros_custos": outros_custos,
-                        "custo_total": custo_total,
-                        "proxima_dose": proxima_dose,
+                        "tipo_movimento": "Saída / Consumo",
+                        "data_movimento": data_evento,
+                        "quantidade": quantidade_total,
+                        "valor_unitario": valor_unitario,
+                        "valor_total": valor_produtos,
+                        "pessoa_id": veterinario_pessoa_id,
+                        "pessoa_nome": veterinario_nome,
+                        "destino_tipo": destino_tipo,
+                        "animal_sbb": animal_sbb,
+                        "categoria_animal": categoria_animal,
+                        "manejo": manejo,
                         "centro_custo": centro_custo,
                         "atividade": atividade,
-                        "gerar_financeiro": gerar_financeiro,
-                        "observacoes": observacoes,
-                    }, animais_payload)
+                        "observacoes": f"Baixa automática gerada pelo evento sanitário #{evento_id}. {tipo_evento}. {observacoes}",
+                    })
 
-                    mov_id = None
-                    if gerar_baixa_estoque and produto_id and quantidade_total > 0:
-                        mov_id = EstoqueRepository.salvar_movimentacao({
-                            "produto_id": produto_id,
-                            "tipo_movimento": "Saída / Consumo",
-                            "data_movimento": data_evento,
-                            "quantidade": quantidade_total,
-                            "valor_unitario": valor_unitario,
-                            "valor_total": valor_produtos,
-                            "pessoa_id": veterinario_pessoa_id,
-                            "pessoa_nome": veterinario_nome,
-                            "destino_tipo": destino_tipo,
-                            "animal_sbb": animal_sbb,
-                            "categoria_animal": categoria_animal,
-                            "manejo": manejo,
-                            "centro_custo": centro_custo,
-                            "atividade": atividade,
-                            "observacoes": f"Baixa automática gerada pelo evento sanitário #{evento_id}. {tipo_evento}. {observacoes}",
+                lanc_id = None
+                if gerar_financeiro and custo_total > 0:
+                    parcelas = [{"numero": 1, "vencimento": data_evento, "valor": custo_total, "status": "Aberta", "observacoes": f"Evento sanitário #{evento_id}"}]
+                    rateios = []
+                    for a in animais_payload:
+                        rateios.append({
+                            "criterio_rateio": "Animal específico",
+                            "animal_sbb": a["animal_sbb"],
+                            "categoria_animal": "",
+                            "manejo": "",
+                            "percentual": 100 / len(animais_payload),
+                            "valor_rateado": a["custo_rateado"],
+                            "observacoes": f"Rateio automático do evento sanitário #{evento_id}",
                         })
-
-                    lanc_id = None
-                    if gerar_financeiro and custo_total > 0:
-                        parcelas = [{"numero": 1, "vencimento": data_evento, "valor": custo_total, "status": "Aberta", "observacoes": f"Evento sanitário #{evento_id}"}]
-                        rateios = []
-                        for a in animais_payload:
-                            rateios.append({
-                                "criterio_rateio": "Animal específico",
-                                "animal_sbb": a["animal_sbb"],
-                                "categoria_animal": "",
-                                "manejo": "",
-                                "percentual": 100 / len(animais_payload),
-                                "valor_rateado": a["custo_rateado"],
-                                "observacoes": f"Rateio automático do evento sanitário #{evento_id}",
-                            })
-                        lanc_id = FinanceiroRepository.salvar_lancamento({
-                            "tipo": "Saída",
-                            "data_evento": data_evento,
-                            "data_emissao": data_evento,
-                            "competencia": data_evento[3:] if len(data_evento) == 10 else data_evento,
-                            "descricao": f"{tipo_evento} - {nome_comercial or principio_ativo or 'Evento sanitário'}",
-                            "pessoa_id": veterinario_pessoa_id,
-                            "pessoa_nome": veterinario_nome,
-                            "valor_total": custo_total,
-                            "forma_pagamento": "",
-                            "centro_custo": centro_custo or "Veterinário",
-                            "atividade": atividade or "Sanidade",
-                            "origem_modulo": "Sanidade",
-                            "observacoes": f"Gerado automaticamente pelo evento sanitário #{evento_id}. {observacoes}",
-                        }, parcelas, rateios)
-                    SanidadeRepository.atualizar_integracoes(evento_id, lancamento_financeiro_id=lanc_id, movimentacao_estoque_id=mov_id)
-                    st.session_state["sanidade_msg"] = f"✅ Evento sanitário #{evento_id} salvo com sucesso. Animais: {len(animais_sel)}. Estoque: {'sim' if mov_id else 'não'}. Financeiro: {'sim' if lanc_id else 'não'}."
-                    st.session_state["sanidade_form_version"] = versao + 1
-                    st.rerun()
+                    lanc_id = FinanceiroRepository.salvar_lancamento({
+                        "tipo": "Saída",
+                        "data_evento": data_evento,
+                        "data_emissao": data_evento,
+                        "competencia": data_evento[3:] if len(data_evento) == 10 else data_evento,
+                        "descricao": f"{tipo_evento} - {nome_comercial or principio_ativo or 'Evento sanitário'}",
+                        "pessoa_id": veterinario_pessoa_id,
+                        "pessoa_nome": veterinario_nome,
+                        "valor_total": custo_total,
+                        "forma_pagamento": "",
+                        "centro_custo": centro_custo or "Veterinário",
+                        "atividade": atividade or "Sanidade",
+                        "origem_modulo": "Sanidade",
+                        "observacoes": f"Gerado automaticamente pelo evento sanitário #{evento_id}. {observacoes}",
+                    }, parcelas, rateios)
+                SanidadeRepository.atualizar_integracoes(evento_id, lancamento_financeiro_id=lanc_id, movimentacao_estoque_id=mov_id)
+                for a in animais_payload:
+                    EventoRepository.registrar({
+                        "data_evento": data_evento,
+                        "tipo_evento": tipo_evento,
+                        "modulo_origem": "Sanidade",
+                        "entidade_tipo": "Animal",
+                        "entidade_id": a.get("animal_sbb"),
+                        "animal_sbb": a.get("animal_sbb"),
+                        "pessoa_id": veterinario_pessoa_id,
+                        "produto_id": produto_id,
+                        "lancamento_financeiro_id": lanc_id,
+                        "movimentacao_estoque_id": mov_id,
+                        "sanidade_evento_id": evento_id,
+                        "descricao": f"{tipo_evento} - {nome_comercial or principio_ativo or produto_nome or 'Evento sanitário'}",
+                        "observacoes": observacoes,
+                    })
+                st.session_state["sanidade_msg"] = f"✅ Evento sanitário #{evento_id} salvo com sucesso. Animais: {len(animais_sel)}. Estoque: {'sim' if mov_id else 'não'}. Financeiro: {'sim' if lanc_id else 'não'}."
+                st.session_state["sanidade_form_version"] = versao + 1
+                st.rerun()
 
     with tab_eventos:
         st.markdown("### Histórico sanitário")
@@ -1481,9 +1526,264 @@ def render_modulo_sanidade():
         else:
             st.dataframe(df_alertas, use_container_width=True, hide_index=True)
 
-aba_cad, aba_fila, aba_animais, aba_pessoas, aba_financeiro, aba_estoque, aba_sanidade = st.tabs(["Cadastrar por SBB", "Fila de Extração", "Cadastro Completo", "Pessoas", "Financeiro", "Estoque", "Sanidade"])
 
-with aba_cad:
+
+# ============================================================
+# REPRODUÇÃO
+# ============================================================
+def _opcoes_temporadas_reproducao():
+    temporadas = ReproducaoRepository.listar_temporadas(incluir_inativas=False)
+    op = {"": None}
+    for t in temporadas:
+        op[f"{t.get('nome')} | {t.get('status','')}"] = t
+    return op
+
+
+def _opcoes_matrizes_reproducao():
+    animais = ReproducaoRepository.matrizes_ativas()
+    op = {"": None}
+    for a in animais:
+        op[f"{a.get('nome') or ''} | {a.get('sbb') or ''}"] = a
+    return op
+
+
+def _opcoes_garanhoes_reproducao():
+    animais = ReproducaoRepository.garanhoes_ativos()
+    op = {"": None}
+    for a in animais:
+        op[f"{a.get('nome') or ''} | {a.get('sbb') or ''}"] = a
+    return op
+
+
+def render_modulo_reproducao():
+    st.subheader("Reprodução")
+    st.caption("Temporada reprodutiva, planejamento de acasalamentos, inseminações/coberturas e diagnóstico de gestação.")
+
+    tab_temp, tab_plan, tab_eventos, tab_rel = st.tabs(["Temporadas", "Planejamento", "Execução do ciclo", "Relatórios"])
+
+    pessoas_op = _opcoes_pessoas_financeiro()
+    produtos_op = _opcoes_produtos_estoque()
+
+    with tab_temp:
+        if st.session_state.get("repro_temp_msg"):
+            st.success(st.session_state.pop("repro_temp_msg"))
+        st.markdown("### Nova temporada")
+        v = st.session_state.get("repro_temp_form_version", 0)
+        with st.form(f"form_temporada_repro_{v}"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                nome = st.text_input("Nome da temporada *", placeholder="Ex: 2026/2027")
+                status = st.selectbox("Status", ReproducaoRepository.STATUS_TEMPORADA)
+            with c2:
+                data_inicio = st.text_input("Data início", placeholder="DD/MM/AAAA")
+                data_fim = st.text_input("Data fim", placeholder="DD/MM/AAAA")
+            with c3:
+                observacoes = st.text_area("Observações")
+            salvar = st.form_submit_button("Salvar temporada", type="primary")
+            if salvar:
+                if not nome.strip():
+                    st.warning("Informe o nome da temporada.")
+                else:
+                    temp_id = ReproducaoRepository.salvar_temporada({"nome": nome, "data_inicio": data_inicio, "data_fim": data_fim, "status": status, "observacoes": observacoes})
+                    st.session_state.repro_temp_form_version = v + 1
+                    st.session_state.repro_temp_msg = f"✅ Temporada cadastrada com sucesso. ID {temp_id}."
+                    st.rerun()
+
+        st.markdown("### Temporadas cadastradas")
+        temporadas = pd.DataFrame(ReproducaoRepository.listar_temporadas())
+        mostrar_df(temporadas, "Nenhuma temporada cadastrada.")
+        if not temporadas.empty:
+            ids = temporadas["id"].tolist()
+            col1, col2 = st.columns([2, 1])
+            tid = col1.selectbox("Selecionar temporada para arquivar/excluir", ids, format_func=lambda x: f"#{x} - {temporadas.loc[temporadas['id']==x, 'nome'].iloc[0]}")
+            if col2.button("Arquivar temporada", use_container_width=True):
+                ReproducaoRepository.excluir_temporada(tid)
+                st.success("Temporada arquivada.")
+                st.rerun()
+
+    with tab_plan:
+        if st.session_state.get("repro_plan_msg"):
+            st.success(st.session_state.pop("repro_plan_msg"))
+        st.markdown("### Novo planejamento")
+        v = st.session_state.get("repro_plan_form_version", 0)
+        temp_op = _opcoes_temporadas_reproducao()
+        matrizes_op = _opcoes_matrizes_reproducao()
+        garanhoes_op = _opcoes_garanhoes_reproducao()
+        with st.form(f"form_planejamento_repro_{v}"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                temp_label = st.selectbox("Temporada *", list(temp_op.keys()))
+                temporada = temp_op.get(temp_label)
+                matriz_label = st.selectbox("Matriz *", list(matrizes_op.keys()))
+                matriz = matrizes_op.get(matriz_label)
+                status_rep = st.selectbox("Status reprodutivo", ReproducaoRepository.STATUS_REPRODUTIVO)
+            with c2:
+                gar_label = st.selectbox("Garanhão pretendido", list(garanhoes_op.keys()))
+                garanhao = garanhoes_op.get(gar_label)
+                tipo_cobertura = st.selectbox("Tipo de cobertura", [""] + ReproducaoRepository.TIPOS_COBERTURA)
+                custo_previsto = st.number_input("Custo previsto", min_value=0.0, step=100.0)
+            with c3:
+                vet_label = st.selectbox("Veterinário", list(pessoas_op.keys()), key=f"repro_plan_vet_{v}")
+                vet_val = pessoas_op.get(vet_label)
+                central_label = st.selectbox("Central", list(pessoas_op.keys()), key=f"repro_plan_central_{v}")
+                central_val = pessoas_op.get(central_label)
+                transp_label = st.selectbox("Transportador", list(pessoas_op.keys()), key=f"repro_plan_transp_{v}")
+                transp_val = pessoas_op.get(transp_label)
+            observacoes = st.text_area("Observações do cruzamento")
+            salvar = st.form_submit_button("Salvar planejamento", type="primary")
+            if salvar:
+                if not temporada:
+                    st.warning("Selecione a temporada.")
+                elif not matriz:
+                    st.warning("Selecione a matriz.")
+                else:
+                    plan_id = ReproducaoRepository.salvar_planejamento({
+                        "temporada_id": temporada.get("id"), "temporada_nome": temporada.get("nome"),
+                        "matriz_sbb": matriz.get("sbb"), "matriz_nome": matriz.get("nome"),
+                        "garanhao_sbb": (garanhao or {}).get("sbb"), "garanhao_nome": (garanhao or {}).get("nome"),
+                        "tipo_cobertura": tipo_cobertura,
+                        "central_pessoa_id": central_val[0] if central_val else None, "central_nome": central_val[1] if central_val else "",
+                        "veterinario_pessoa_id": vet_val[0] if vet_val else None, "veterinario_nome": vet_val[1] if vet_val else "",
+                        "transportador_pessoa_id": transp_val[0] if transp_val else None, "transportador_nome": transp_val[1] if transp_val else "",
+                        "status_reprodutivo": status_rep, "custo_previsto": custo_previsto, "observacoes": observacoes,
+                    })
+                    st.session_state.repro_plan_form_version = v + 1
+                    st.session_state.repro_plan_msg = f"✅ Planejamento cadastrado com sucesso. ID {plan_id}."
+                    st.rerun()
+
+        st.markdown("### Planejamentos")
+        f1, f2, f3 = st.columns(3)
+        temp_f_op = _opcoes_temporadas_reproducao()
+        tf_label = f1.selectbox("Filtrar temporada", list(temp_f_op.keys()), key="repro_f_temp")
+        sf = f2.selectbox("Filtrar status", [""] + ReproducaoRepository.STATUS_REPRODUTIVO, key="repro_f_status")
+        busca = f3.text_input("Buscar", key="repro_f_busca")
+        filtros = {"busca": busca, "status_reprodutivo": sf}
+        if temp_f_op.get(tf_label):
+            filtros["temporada_id"] = temp_f_op[tf_label]["id"]
+        plans = pd.DataFrame(ReproducaoRepository.listar_planejamentos(filtros))
+        mostrar_df(plans, "Nenhum planejamento encontrado.")
+        if not plans.empty:
+            ids = plans["id"].tolist()
+            pid = st.selectbox("Selecionar planejamento para excluir", ids, format_func=lambda x: f"#{x} - {plans.loc[plans['id']==x, 'Matriz'].iloc[0]}")
+            if st.button("Excluir planejamento selecionado"):
+                ReproducaoRepository.excluir_planejamento(pid)
+                st.success("Planejamento excluído/inativado.")
+                st.rerun()
+
+    with tab_eventos:
+        if st.session_state.get("repro_evento_msg"):
+            st.success(st.session_state.pop("repro_evento_msg"))
+        st.markdown("### Registrar execução do ciclo")
+        v = st.session_state.get("repro_evento_form_version", 0)
+        plans_raw = ReproducaoRepository.listar_planejamentos({})
+        plan_op = {"": None}
+        for p in plans_raw:
+            plan_op[f"#{p.get('id')} | {p.get('Matriz')} x {p.get('Garanhão') or '---'} | {p.get('Temporada')}"] = p.get("id")
+        with st.form(f"form_evento_repro_{v}"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                plan_label = st.selectbox("Planejamento *", list(plan_op.keys()))
+                planejamento_id = plan_op.get(plan_label)
+                plan = ReproducaoRepository.buscar_planejamento(planejamento_id) if planejamento_id else None
+                tipo_evento = st.selectbox("Tipo de evento", ["Inseminação/Cobertura", "Diagnóstico de gestação", "Parto", "Falha/Repetição", "Outro"])
+                data_evento = st.text_input("Data do evento *", placeholder="DD/MM/AAAA")
+            with c2:
+                tipo_cobertura = st.selectbox("Tipo de cobertura", [""] + ReproducaoRepository.TIPOS_COBERTURA, index=0)
+                diagnostico = st.selectbox("Diagnóstico", [""] + ReproducaoRepository.TIPOS_DIAGNOSTICO)
+                status_resultante = st.selectbox("Status resultante", [""] + ReproducaoRepository.STATUS_REPRODUTIVO)
+            with c3:
+                vet_label = st.selectbox("Veterinário", list(pessoas_op.keys()), key=f"repro_event_vet_{v}")
+                vet_val = pessoas_op.get(vet_label)
+                produto_label = st.selectbox("Produto/medicação/sêmen do estoque", list(produtos_op.keys()), key=f"repro_event_prod_{v}")
+                produto_val = produtos_op.get(produto_label)
+                quantidade_produto = st.number_input("Quantidade produto", min_value=0.0, step=1.0)
+                unidade_produto = st.selectbox("Unidade", [""] + EstoqueRepository.UNIDADES)
+            c4, c5, c6 = st.columns(3)
+            with c4:
+                custo_total = st.number_input("Custo total do evento", min_value=0.0, step=100.0)
+            with c5:
+                centro_custo = st.selectbox("Centro de custo", [""] + FinanceiroRepository.CENTROS_CUSTO)
+            with c6:
+                atividade = st.selectbox("Atividade", [""] + FinanceiroRepository.ATIVIDADES)
+            observacoes = st.text_area("Observações")
+            salvar = st.form_submit_button("Salvar evento reprodutivo", type="primary")
+            if salvar:
+                if not plan:
+                    st.warning("Selecione um planejamento.")
+                elif not data_evento.strip():
+                    st.warning("Informe a data do evento.")
+                else:
+                    if not tipo_cobertura:
+                        tipo_cobertura = plan.get("tipo_cobertura") or ""
+                    if tipo_evento == "Diagnóstico de gestação" and diagnostico == "Positivo" and not status_resultante:
+                        status_resultante = "Prenha"
+                    elif tipo_evento == "Diagnóstico de gestação" and diagnostico == "Negativo" and not status_resultante:
+                        status_resultante = "Falhada"
+                    evento_id = ReproducaoRepository.salvar_evento({
+                        "planejamento_id": plan.get("id"), "temporada_id": plan.get("temporada_id"), "temporada_nome": plan.get("temporada_nome"),
+                        "matriz_sbb": plan.get("matriz_sbb"), "matriz_nome": plan.get("matriz_nome"),
+                        "garanhao_sbb": plan.get("garanhao_sbb"), "garanhao_nome": plan.get("garanhao_nome"),
+                        "tipo_evento": tipo_evento, "data_evento": data_evento, "tipo_cobertura": tipo_cobertura,
+                        "diagnostico": diagnostico, "status_resultante": status_resultante,
+                        "veterinario_pessoa_id": vet_val[0] if vet_val else plan.get("veterinario_pessoa_id"), "veterinario_nome": vet_val[1] if vet_val else plan.get("veterinario_nome"),
+                        "produto_id": produto_val, "produto_nome": produto_label.split(" | ")[0] if produto_label else "",
+                        "quantidade_produto": quantidade_produto, "unidade_produto": unidade_produto,
+                        "custo_total": custo_total, "centro_custo": centro_custo, "atividade": atividade, "observacoes": observacoes,
+                    })
+                    # Alimenta linha do tempo da matriz.
+                    EventoRepository.registrar({
+                        "data_evento": data_evento,
+                        "tipo_evento": tipo_evento,
+                        "modulo_origem": "Reprodução",
+                        "entidade_tipo": "reproducao_evento",
+                        "entidade_id": evento_id,
+                        "animal_sbb": plan.get("matriz_sbb"),
+                        "pessoa_id": vet_val[0] if vet_val else plan.get("veterinario_pessoa_id"),
+                        "produto_id": produto_val,
+                        "descricao": f"{tipo_evento}: {plan.get('matriz_nome')} x {plan.get('garanhao_nome') or '---'}",
+                        "observacoes": observacoes,
+                    })
+                    st.session_state.repro_evento_form_version = v + 1
+                    st.session_state.repro_evento_msg = f"✅ Evento reprodutivo cadastrado com sucesso. ID {evento_id}."
+                    st.rerun()
+
+        st.markdown("### Eventos reprodutivos")
+        eventos = pd.DataFrame(ReproducaoRepository.listar_eventos({}))
+        mostrar_df(eventos, "Nenhum evento reprodutivo registrado.")
+
+    with tab_rel:
+        st.markdown("### Indicadores iniciais")
+        plans = ReproducaoRepository.listar_planejamentos({})
+        eventos = ReproducaoRepository.listar_eventos({})
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Planejamentos", len(plans))
+        c2.metric("Eventos", len(eventos))
+        c3.metric("Matrizes ativas", len(ReproducaoRepository.matrizes_ativas()))
+        c4.metric("Garanhões ativos", len(ReproducaoRepository.garanhoes_ativos()))
+        if plans:
+            dfp = pd.DataFrame(plans)
+            if "Status" in dfp.columns:
+                st.markdown("### Status dos planejamentos")
+                st.dataframe(dfp.groupby("Status").size().reset_index(name="Quantidade"), use_container_width=True, hide_index=True)
+
+
+st.sidebar.markdown("## Navegação")
+modulo = st.sidebar.radio(
+    "Selecione o módulo",
+    [
+        "Cadastrar por SBB",
+        "Fila de Extração",
+        "Cadastro Completo",
+        "Pessoas",
+        "Financeiro",
+        "Estoque",
+        "Sanidade",
+        "Reprodução",
+    ],
+    key="menu_principal_modulo",
+)
+
+if modulo == "Cadastrar por SBB":
     st.subheader("Informar SBBs para cadastro")
     st.write("Use o botão **+ Adicionar SBB** para montar a lista antes de iniciar a extração.")
 
@@ -1536,7 +1836,7 @@ with aba_cad:
     st.divider()
     st.info("Nesta etapa o sistema grava os dados em banco. A planilha deixa de ser o destino final e passa a servir apenas como referência de estrutura.")
 
-with aba_fila:
+if modulo == "Fila de Extração":
     st.subheader("Fila de Extração")
     c1, c2 = st.columns([1.2, 3])
     with c1:
@@ -1603,7 +1903,7 @@ with aba_fila:
         with st.expander("Ver tabela técnica da fila"):
             mostrar_df(pd.DataFrame(fila), "Nenhum SBB na fila.")
 
-with aba_animais:
+if modulo == "Cadastro Completo":
     st.subheader("Selecionar animal cadastrado")
     incluir_inativos = st.checkbox("Incluir vendidos/entregues e inativos na consulta", value=True)
     mapa = opcoes_animais(incluir_inativos=incluir_inativos)
@@ -1626,7 +1926,7 @@ with aba_animais:
     with c5: card("Categoria", animal.get("categoria_calculada") or animal.get("categoria_idade"))
     with c6: card("Status", animal.get("status_ecossistema") or "Ativo na cabanha")
 
-    tab_resumo, tab_principal, tab_meritos, tab_padreacoes, tab_desc, tab_irmaos, tab_pedigree, tab_venda_parceria, tab_historico = st.tabs([
+    tab_resumo, tab_principal, tab_meritos, tab_padreacoes, tab_desc, tab_irmaos, tab_pedigree, tab_venda_parceria, tab_historico, tab_linha_tempo = st.tabs([
         "Resumo do Cadastro",
         "Principal ABCCC",
         "Méritos",
@@ -1636,6 +1936,7 @@ with aba_animais:
         "Pedigree",
         "Venda / Parceria",
         "Histórico",
+        "Linha do Tempo",
     ])
 
     with tab_resumo:
@@ -1876,15 +2177,24 @@ with aba_animais:
         st.info("Nesta aba ficará a linha do tempo do animal. Por enquanto começamos pelo histórico de status; depois sanidade, reprodução, morfologia e financeiro também alimentarão esta linha do tempo.")
 
 
-with aba_pessoas:
+
+    with tab_linha_tempo:
+        st.markdown("### Linha do Tempo do Animal")
+        eventos = EventoRepository.listar({"animal_sbb": sbb})
+        render_timeline(eventos)
+
+if modulo == "Pessoas":
     render_modulo_pessoas()
 
 
-with aba_financeiro:
+if modulo == "Financeiro":
     render_modulo_financeiro()
 
-with aba_estoque:
+if modulo == "Estoque":
     render_modulo_estoque()
 
-with aba_sanidade:
+if modulo == "Sanidade":
     render_modulo_sanidade()
+
+if modulo == "Reprodução":
+    render_modulo_reproducao()

@@ -128,3 +128,63 @@ A importação de XML da NF-e foi ajustada para tratar cada item da nota individ
 - cada item possui sua própria atividade;
 - cada item possui seu próprio destino/rateio: animal específico, categoria, manejo ou todos os animais;
 - a nota continua sendo o documento pai, mas o custo/estoque é classificado por item.
+
+## v0.6.3 — Infraestrutura de Componentes e Eventos
+
+Esta versão inicia a infraestrutura reutilizável do ERP.
+
+### Novos componentes
+
+- `components/entity_selector.py`
+  - Base para seleção contextual no padrão: selecionar, consultar e cadastrar rápido.
+  - Inclui cadastro rápido de Pessoas e Produtos/Insumos.
+
+- `components/event_timeline.py`
+  - Componente inicial para exibir a linha do tempo do animal.
+
+- `components/tabela_padrao.py`
+  - Primeira versão de tabela padronizada para uso futuro.
+
+### Nova entidade técnica
+
+- `eventos_gerais`
+  - Tabela base para linha do tempo.
+  - Qualquer módulo poderá registrar eventos nela.
+
+### Integração inicial
+
+- Eventos de Sanidade agora também alimentam a Linha do Tempo do Animal.
+- A tela de Sanidade ganhou área de cadastro rápido contextual para nova pessoa/responsável e novo produto/insumo.
+
+Observação: os formulários antigos ainda usam `st.form`. Como o Streamlit não permite botões comuns dentro de `st.form`, a implantação completa do botão `+` ao lado de cada campo será feita gradualmente conforme as telas forem refatoradas para o novo padrão de componentes.
+
+## v0.6.4 - Cadastro contextual via primeira opção da lista
+
+Ajustes de usabilidade:
+- O padrão de cadastro rápido foi alterado para ficar dentro da própria lista do campo.
+- A primeira opção agora é `➕ Cadastrar novo...`.
+- Ao selecionar essa opção, o cadastro rápido aparece imediatamente no local do campo.
+- Aplicado inicialmente no módulo de Sanidade para:
+  - Produto do estoque
+  - Veterinário / responsável
+- O formulário de Sanidade foi ajustado para funcionar fora de `st.form`, permitindo a reação imediata da tela ao selecionar `➕ Cadastrar novo...`.
+
+Esse padrão será replicado gradualmente para os demais formulários do ERP.
+
+## v0.7 — Reprodução
+
+Incluído módulo inicial de Reprodução com:
+
+- Temporadas reprodutivas.
+- Planejamento de matrizes x garanhões.
+- Tipo de cobertura: monta natural, sêmen fresco, sêmen congelado e transferência de embrião.
+- Execução do ciclo: inseminação/cobertura, diagnóstico, parto, falha/repetição e outros eventos.
+- Status reprodutivo da matriz no planejamento.
+- Diagnóstico positivo altera o status do planejamento para Prenha.
+- Eventos reprodutivos alimentam a linha do tempo do animal.
+- Relatórios iniciais de planejamentos, eventos, matrizes e garanhões ativos.
+
+## v0.7.1 - Correção de navegação
+- O menu principal foi movido para a barra lateral.
+- Todos os módulos anteriores continuam disponíveis: Cadastrar por SBB, Fila, Cadastro Completo, Pessoas, Financeiro, Estoque, Sanidade e Reprodução.
+- A mudança evita que módulos fiquem ocultos quando há muitos tabs na parte superior da tela.
