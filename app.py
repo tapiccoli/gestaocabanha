@@ -21,9 +21,11 @@ from database import (
     listar_parcerias_animal,
 )
 from services.extraction_worker import processar_fila
+from services.nfe_xml_service import ler_xml_nfe
 from repositories.pessoa_repository import PessoaRepository
 from repositories.financeiro_repository import FinanceiroRepository
 from repositories.estoque_repository import EstoqueRepository
+from repositories.sanidade_repository import SanidadeRepository
 from utils.campos_abccc import (
     CAMPOS_TECNICOS_EXCLUIR,
     CAMPOS_PRINCIPAL,
@@ -437,18 +439,18 @@ def render_modulo_financeiro():
                     erro_rateio = "Selecione pelo menos um animal para o rateio."
 
             elif criterio_rateio == "Categoria":
-                categoria_animal = st.text_input("Categoria animal", placeholder="Ex: Égua Adulta, Macho Adulto Inteiro, Potro Desmamado...")
+                categoria_animal = st.selectbox("Categoria animal", _opcoes_categorias_animais())
                 qtd_destinos = 1
                 rateios = [{"criterio_rateio": criterio_rateio, "categoria_animal": categoria_animal, "percentual": 100, "valor_rateado": valor_total}]
-                if not categoria_animal.strip():
-                    erro_rateio = "Informe a categoria do rateio."
+                if not categoria_animal:
+                    erro_rateio = "Selecione a categoria do rateio."
 
             elif criterio_rateio == "Manejo":
-                manejo = st.text_input("Manejo", placeholder="Ex: Cabanha, Pastagem, Campo com suplementação...")
+                manejo = st.selectbox("Manejo", _opcoes_manejos_animais())
                 qtd_destinos = 1
                 rateios = [{"criterio_rateio": criterio_rateio, "manejo": manejo, "percentual": 100, "valor_rateado": valor_total}]
-                if not manejo.strip():
-                    erro_rateio = "Informe o manejo do rateio."
+                if not manejo:
+                    erro_rateio = "Selecione o manejo do rateio."
 
             else:
                 qtd_destinos = len([v for v in animais_op.values() if v])
@@ -640,11 +642,13 @@ def render_modulo_financeiro():
                                     e_rateios.append({"criterio_rateio": e_criterio_rateio, "animal_sbb": animais_op_edit[rotulo], "percentual": 100 / qtd, "valor_rateado": e_valor_total / qtd})
                         elif e_criterio_rateio == "Categoria":
                             categoria_atual = rateios[0].get("Categoria") if rateios else ""
-                            e_categoria_animal = st.text_input("Categoria animal", value=categoria_atual or "", key=f"e_categoria_{lancamento_id_sel}")
+                            categorias = _opcoes_categorias_animais()
+                            e_categoria_animal = st.selectbox("Categoria animal", categorias, index=categorias.index(categoria_atual) if categoria_atual in categorias else 0, key=f"e_categoria_{lancamento_id_sel}")
                             e_rateios = [{"criterio_rateio": e_criterio_rateio, "categoria_animal": e_categoria_animal, "percentual": 100, "valor_rateado": e_valor_total}]
                         elif e_criterio_rateio == "Manejo":
                             manejo_atual = rateios[0].get("Manejo") if rateios else ""
-                            e_manejo = st.text_input("Manejo", value=manejo_atual or "", key=f"e_manejo_{lancamento_id_sel}")
+                            manejos = _opcoes_manejos_animais()
+                            e_manejo = st.selectbox("Manejo", manejos, index=manejos.index(manejo_atual) if manejo_atual in manejos else 0, key=f"e_manejo_{lancamento_id_sel}")
                             e_rateios = [{"criterio_rateio": e_criterio_rateio, "manejo": e_manejo, "percentual": 100, "valor_rateado": e_valor_total}]
                         else:
                             e_rateios = [{"criterio_rateio": "Todos os Animais", "percentual": 100, "valor_rateado": e_valor_total}]
@@ -736,11 +740,89 @@ def _opcoes_produtos_estoque():
     return opcoes
 
 
+def _opcoes_categorias_animais():
+    return [
+        "",
+        "Potro ao pé",
+        "Potra ao pé",
+        "Potro Desmamado",
+        "Potra Desmamada",
+        "Potro Sobreano",
+        "Potra Sobreano",
+        "Potranco",
+        "Potranca",
+        "Macho Adulto Inteiro",
+        "Macho Adulto Castrado",
+        "Égua Adulta",
+        "Égua Idosa",
+    ]
+
+
+def _opcoes_manejos_animais():
+    return [
+        "",
+        "A campo",
+        "Pastagem",
+        "Campo com suplementação",
+        "Cabanha",
+        "Doma",
+        "Treinamento",
+        "Central reprodutiva",
+    ]
+
+
+def _formatar_moeda(valor):
+    return f"R$ {float(valor or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _calcular_estoque_fracionado(qtd_compra, valor_total, fator_conversao):
+    """Converte unidade de compra da nota para unidade real de consumo/controle.
+
+    Exemplo: NF veio 1 frasco de R$ 100. Produto controla 50 mL por frasco.
+    Resultado: entra 50 mL no estoque, custo unitário R$ 2,00/mL.
+    """
+    qtd_compra = float(qtd_compra or 0)
+    valor_total = float(valor_total or 0)
+    fator = float(fator_conversao or 1)
+    if fator <= 0:
+        fator = 1
+    qtd_consumo = qtd_compra * fator
+    valor_unitario_consumo = valor_total / qtd_consumo if qtd_consumo else 0
+    return qtd_consumo, valor_unitario_consumo
+
+
+def _render_destino_estoque(prefixo, destino_tipo, animais_op):
+    """Renderiza destino da movimentação sem campos livres para categoria/manejo."""
+    animal_sbb = categoria_animal = manejo = ""
+    if destino_tipo == "Animal específico":
+        animal_rotulo = st.selectbox("Animal", list(animais_op.keys()), key=f"{prefixo}_animal")
+        animal_sbb = animais_op.get(animal_rotulo, "")
+    elif destino_tipo == "Categoria":
+        categoria_animal = st.selectbox("Categoria animal", _opcoes_categorias_animais(), key=f"{prefixo}_categoria")
+    elif destino_tipo == "Manejo":
+        manejo = st.selectbox("Manejo", _opcoes_manejos_animais(), key=f"{prefixo}_manejo")
+    return animal_sbb, categoria_animal, manejo
+
+
+def _validar_destino_estoque(destino_tipo, animal_sbb, categoria_animal, manejo):
+    if destino_tipo == "Animal específico" and not animal_sbb:
+        return "Selecione o animal do destino."
+    if destino_tipo == "Categoria" and not categoria_animal:
+        return "Selecione a categoria animal."
+    if destino_tipo == "Manejo" and not manejo:
+        return "Selecione o manejo."
+    return ""
+
+
 def render_modulo_estoque():
     st.subheader("Estoque")
     st.caption("Cadastro de insumos, medicamentos, rações, suplementos, sêmen/palhetas e controle de entradas/consumos. Esta base será reaproveitada por sanidade, reprodução, leilões e manejo.")
 
-    tab_produtos, tab_mov, tab_saldos = st.tabs(["Produtos / Insumos", "Movimentações", "Saldos e alertas"])
+    tab_produtos, tab_mov, tab_saldos = st.tabs(["Insumos e Cadastros", "Movimentações sem nota", "Saldos e alertas"])
+
+    produtos_op = _opcoes_produtos_estoque()
+    pessoas_op = _opcoes_pessoas_financeiro()
+    animais_op = _opcoes_animais_financeiro()
 
     with tab_produtos:
         st.markdown("### Cadastro de produto/insumo")
@@ -762,18 +844,34 @@ def render_modulo_estoque():
                     [""] + EstoqueRepository.CATEGORIAS,
                     index=([""] + EstoqueRepository.CATEGORIAS).index(atual.get("categoria", "")) if atual.get("categoria", "") in ([""] + EstoqueRepository.CATEGORIAS) else 0,
                 )
-                unidade = st.selectbox(
-                    "Unidade",
+                unidade_compra_atual = atual.get("unidade_compra") or ""
+                unidade_consumo_atual = atual.get("unidade_consumo") or atual.get("unidade") or ""
+                unidade_compra = st.selectbox(
+                    "Unidade de compra",
                     [""] + EstoqueRepository.UNIDADES,
-                    index=([""] + EstoqueRepository.UNIDADES).index(atual.get("unidade", "")) if atual.get("unidade", "") in ([""] + EstoqueRepository.UNIDADES) else 0,
+                    index=([""] + EstoqueRepository.UNIDADES).index(unidade_compra_atual) if unidade_compra_atual in ([""] + EstoqueRepository.UNIDADES) else 0,
+                    help="Como o produto normalmente vem na nota. Ex: frasco, saco, fardo, un."
+                )
+                unidade_consumo = st.selectbox(
+                    "Unidade de controle/consumo",
+                    [""] + EstoqueRepository.UNIDADES,
+                    index=([""] + EstoqueRepository.UNIDADES).index(unidade_consumo_atual) if unidade_consumo_atual in ([""] + EstoqueRepository.UNIDADES) else 0,
+                    help="Como será baixado no uso. Ex: mL, g, kg, dose."
                 )
             with c2:
                 apresentacao = st.text_input("Apresentação", value=atual.get("apresentacao", ""), placeholder="Ex: Saco 40kg, frasco 50mL")
                 laboratorio = st.text_input("Laboratório/Fabricante", value=atual.get("laboratorio_fabricante", ""))
                 vencimento = st.text_input("Data de vencimento", value=atual.get("data_vencimento", ""), placeholder="DD/MM/AAAA")
             with c3:
+                qtd_consumo_por_unidade_compra = st.number_input(
+                    "Qtd. de consumo por unidade de compra",
+                    min_value=0.0,
+                    step=1.0,
+                    value=float(atual.get("qtd_consumo_por_unidade_compra") or 1),
+                    help="Ex: 1 frasco com 50 mL = informe 50. 1 saco com 40 kg = informe 40."
+                )
                 estoque_minimo = st.number_input("Estoque mínimo", min_value=0.0, step=1.0, value=float(atual.get("estoque_minimo") or 0))
-                valor_unitario = st.number_input("Valor unitário padrão", min_value=0.0, step=1.0, value=float(atual.get("valor_unitario") or 0))
+                valor_unitario = st.number_input("Valor unitário padrão da unidade de consumo", min_value=0.0, step=1.0, value=float(atual.get("valor_unitario") or 0))
                 ativo = st.checkbox("Ativo", value=bool(atual.get("ativo", 1)))
 
             observacoes = st.text_area("Observações", value=atual.get("observacoes", ""))
@@ -791,7 +889,10 @@ def render_modulo_estoque():
                         "categoria": categoria,
                         "apresentacao": apresentacao,
                         "laboratorio_fabricante": laboratorio,
-                        "unidade": unidade,
+                        "unidade": unidade_consumo,
+                        "unidade_compra": unidade_compra,
+                        "unidade_consumo": unidade_consumo,
+                        "qtd_consumo_por_unidade_compra": qtd_consumo_por_unidade_compra,
                         "estoque_minimo": estoque_minimo,
                         "valor_unitario": valor_unitario,
                         "data_vencimento": vencimento,
@@ -805,6 +906,243 @@ def render_modulo_estoque():
                 st.session_state["estoque_produto_form_version"] = versao + 1
                 st.session_state["estoque_produto_msg"] = "Formulário limpo para novo produto."
                 st.rerun()
+
+        st.markdown("### Importar NF-e XML")
+        st.caption("Use esta opção quando a entrada de estoque tiver nota fiscal. O sistema lê os itens, permite revisar a NF, vincular produtos existentes ou cadastrar produtos novos.")
+        if st.session_state.get("estoque_mov_msg"):
+            st.success(st.session_state.pop("estoque_mov_msg"))
+
+        versao_xml = st.session_state.get("estoque_xml_form_version", 0)
+        xml = st.file_uploader("Importar XML da NF-e", type=["xml"], key=f"xml_nfe_estoque_{versao_xml}")
+        if xml is not None:
+            try:
+                st.session_state["estoque_xml_dados"] = ler_xml_nfe(xml.read())
+            except Exception as e:
+                st.error(f"Não consegui ler o XML: {e}")
+
+        dados_nfe = st.session_state.get("estoque_xml_dados")
+        if dados_nfe:
+            st.markdown("#### Conferência e edição dos dados da nota")
+            n1, n2, n3, n4 = st.columns(4)
+            nf_numero = n1.text_input("Número da NF", value=dados_nfe.get("numero", ""), key=f"xml_numero_{versao_xml}")
+            nf_serie = n2.text_input("Série", value=dados_nfe.get("serie", ""), key=f"xml_serie_{versao_xml}")
+            nf_emissao = n3.text_input("Data de emissão", value=dados_nfe.get("data_emissao", ""), placeholder="DD/MM/AAAA", key=f"xml_emissao_{versao_xml}")
+            nf_valor = n4.number_input("Valor total da NF", min_value=0.0, step=1.0, value=float(dados_nfe.get("valor_total") or 0), key=f"xml_valor_{versao_xml}")
+
+            f1, f2 = st.columns(2)
+            fornecedor_nome_xml = f1.text_input("Fornecedor da NF", value=dados_nfe.get("fornecedor_nome", ""), key=f"xml_forn_nome_{versao_xml}")
+            fornecedor_cnpj_xml = f2.text_input("CNPJ/CPF fornecedor", value=dados_nfe.get("fornecedor_cnpj", ""), key=f"xml_forn_cnpj_{versao_xml}")
+
+            pessoa_rotulo_xml = st.selectbox(
+                "Vincular fornecedor a uma pessoa cadastrada (opcional)",
+                list(pessoas_op.keys()),
+                key=f"estoque_xml_pessoa_{versao_xml}",
+            )
+            pessoa_id_xml, pessoa_nome_xml = pessoas_op[pessoa_rotulo_xml]
+            if not pessoa_nome_xml:
+                pessoa_nome_xml = fornecedor_nome_xml
+
+            st.info(
+                "A NF pode ter itens de naturezas diferentes. Por isso, a classificação, o centro de custo, "
+                "a atividade e o destino do rateio são definidos individualmente em cada produto da nota."
+            )
+
+            st.markdown("#### Itens encontrados no XML")
+            itens_confirmar = []
+            for idx, item in enumerate(dados_nfe.get("itens", []), start=1):
+                with st.expander(f"Item {idx}: {item.get('descricao', '')} — {item.get('quantidade', 0)} {item.get('unidade', '')}", expanded=True):
+                    a, b, c, d = st.columns(4)
+                    a.write(f"**Código:** {item.get('codigo', '')}")
+                    b.write(f"**NCM:** {item.get('ncm', '')}")
+                    c.write(f"**CFOP:** {item.get('cfop', '')}")
+                    d.write(f"**Valor:** {_formatar_moeda(item.get('valor_total'))}")
+
+                    acao = st.radio(
+                        "O que fazer com este item?",
+                        ["Vincular a produto existente", "Cadastrar como produto novo", "Ignorar este item"],
+                        horizontal=True,
+                        key=f"xml_item_acao_{versao_xml}_{idx}",
+                    )
+
+                    produto_id = None
+                    novo_produto = {}
+                    if acao == "Vincular a produto existente":
+                        produto_rotulo = st.selectbox("Produto do estoque", list(produtos_op.keys()), key=f"xml_item_prod_{versao_xml}_{idx}")
+                        produto_id = produtos_op.get(produto_rotulo)
+                        produto_existente = EstoqueRepository.buscar_produto(produto_id) if produto_id else None
+                        if produto_existente:
+                            fator_existente = float(produto_existente.get("qtd_consumo_por_unidade_compra") or 1)
+                            unidade_consumo_existente = produto_existente.get("unidade_consumo") or produto_existente.get("unidade") or ""
+                            qtd_estoque_preview, valor_unit_preview = _calcular_estoque_fracionado(item.get("quantidade"), item.get("valor_total"), fator_existente)
+                            st.info(
+                                f"Produto classificado como **{produto_existente.get('categoria') or 'Sem categoria'}**. "
+                                f"Entrada no estoque: {qtd_estoque_preview:g} {unidade_consumo_existente} | "
+                                f"Custo unitário: {_formatar_moeda(valor_unit_preview)} por {unidade_consumo_existente}"
+                            )
+                    elif acao == "Cadastrar como produto novo":
+                        n1, n2, n3 = st.columns(3)
+                        nome_novo = n1.text_input("Nome do novo produto", value=item.get("descricao", ""), key=f"xml_novo_nome_{versao_xml}_{idx}")
+                        cat_novo = n2.selectbox("Categoria", [""] + EstoqueRepository.CATEGORIAS, key=f"xml_novo_cat_{versao_xml}_{idx}")
+                        unidade_xml = item.get("unidade") or ""
+                        unidade_padrao = unidade_xml if unidade_xml in EstoqueRepository.UNIDADES else ""
+                        unidade_idx = ([""] + EstoqueRepository.UNIDADES).index(unidade_padrao) if unidade_padrao in ([""] + EstoqueRepository.UNIDADES) else 0
+                        unidade_compra_novo = n3.selectbox("Unidade de compra/NF", [""] + EstoqueRepository.UNIDADES, index=unidade_idx, key=f"xml_novo_un_compra_{versao_xml}_{idx}")
+                        q1, q2 = st.columns(2)
+                        unidade_consumo_novo = q1.selectbox("Unidade de controle/consumo", [""] + EstoqueRepository.UNIDADES, key=f"xml_novo_un_consumo_{versao_xml}_{idx}", help="Ex: frasco comprado, mas estoque em mL.")
+                        qtd_consumo_por_compra_novo = q2.number_input("Qtd. consumo por unidade comprada", min_value=0.0, step=1.0, value=1.0, key=f"xml_novo_fator_{versao_xml}_{idx}", help="Ex: 1 frasco com 50 mL = 50; 1 saco com 40 kg = 40.")
+                        qtd_preview, valor_unit_preview = _calcular_estoque_fracionado(item.get("quantidade"), item.get("valor_total"), qtd_consumo_por_compra_novo)
+                        st.info(f"Entrada no estoque: {qtd_preview:g} {unidade_consumo_novo or unidade_compra_novo or unidade_xml} | Custo unitário: {_formatar_moeda(valor_unit_preview)}")
+                        novo_produto = {
+                            "nome": nome_novo,
+                            "categoria": cat_novo,
+                            "apresentacao": f"{qtd_consumo_por_compra_novo:g} {unidade_consumo_novo} por {unidade_compra_novo or unidade_xml}",
+                            "laboratorio_fabricante": "",
+                            "unidade": unidade_consumo_novo or unidade_compra_novo or unidade_xml,
+                            "unidade_compra": unidade_compra_novo or unidade_xml,
+                            "unidade_consumo": unidade_consumo_novo or unidade_compra_novo or unidade_xml,
+                            "qtd_consumo_por_unidade_compra": qtd_consumo_por_compra_novo,
+                            "estoque_minimo": 0,
+                            "valor_unitario": valor_unit_preview,
+                            "data_vencimento": "",
+                            "observacoes": f"Cadastrado a partir da NF {nf_numero}",
+                            "ativo": 1,
+                        }
+
+                    item_centro_col, item_atividade_col = st.columns(2)
+                    item_centro_custo = item_centro_col.selectbox(
+                        "Centro de custo deste item",
+                        [""] + FinanceiroRepository.CENTROS_CUSTO,
+                        key=f"xml_item_centro_{versao_xml}_{idx}",
+                        help="Ex: Sanidade, Manejo, Reprodução, Alimentação. Cada produto da mesma NF pode ter um centro de custo diferente.",
+                    )
+                    item_atividade = item_atividade_col.selectbox(
+                        "Atividade deste item",
+                        [""] + FinanceiroRepository.ATIVIDADES,
+                        key=f"xml_item_atividade_{versao_xml}_{idx}",
+                    )
+
+                    item_destino_tipo = st.selectbox(
+                        "Aplicar este item para",
+                        ["", "Animal específico", "Categoria", "Manejo", "Todos os Animais"],
+                        key=f"xml_item_destino_tipo_{versao_xml}_{idx}",
+                        help="Define quem receberá o custo/consumo deste produto. Essa escolha é individual por item da NF.",
+                    )
+                    item_animal_sbb, item_categoria_animal, item_manejo = _render_destino_estoque(
+                        f"xml_item_destino_{versao_xml}_{idx}",
+                        item_destino_tipo,
+                        animais_op,
+                    )
+
+                    itens_confirmar.append({
+                        "item_xml": item,
+                        "acao": acao,
+                        "produto_id": produto_id,
+                        "novo_produto": novo_produto,
+                        "centro_custo": item_centro_custo,
+                        "atividade": item_atividade,
+                        "destino_tipo": item_destino_tipo,
+                        "animal_sbb": item_animal_sbb,
+                        "categoria_animal": item_categoria_animal,
+                        "manejo": item_manejo,
+                    })
+
+            obs_xml = st.text_area("Observações", key=f"xml_obs_{versao_xml}")
+            col_xml1, col_xml2 = st.columns(2)
+            confirmar_xml = col_xml1.button("Confirmar entrada da NF no estoque", type="primary", use_container_width=True, key=f"confirmar_xml_{versao_xml}")
+            limpar_xml = col_xml2.button("Limpar XML", use_container_width=True, key=f"limpar_xml_{versao_xml}")
+
+            if limpar_xml:
+                st.session_state.pop("estoque_xml_dados", None)
+                st.session_state["estoque_xml_form_version"] = versao_xml + 1
+                st.rerun()
+
+            if confirmar_xml:
+                processados = 0
+                erros = []
+
+                # Primeiro valida todos os itens da NF. Assim evitamos gravar metade da nota
+                # se algum produto estiver sem classificação, destino ou vínculo.
+                for idx, item_cfg in enumerate(itens_confirmar, start=1):
+                    if item_cfg["acao"] == "Ignorar este item":
+                        continue
+
+                    erro_destino = _validar_destino_estoque(
+                        item_cfg.get("destino_tipo"),
+                        item_cfg.get("animal_sbb"),
+                        item_cfg.get("categoria_animal"),
+                        item_cfg.get("manejo"),
+                    )
+                    if not item_cfg.get("centro_custo"):
+                        erros.append(f"Item {idx}: selecione o centro de custo.")
+                    if not item_cfg.get("atividade"):
+                        erros.append(f"Item {idx}: selecione a atividade.")
+                    if not item_cfg.get("destino_tipo"):
+                        erros.append(f"Item {idx}: selecione para quem este item será aplicado.")
+                    if erro_destino:
+                        erros.append(f"Item {idx}: {erro_destino}")
+
+                    if item_cfg["acao"] == "Cadastrar como produto novo":
+                        novo = item_cfg.get("novo_produto") or {}
+                        if not str(novo.get("nome", "")).strip():
+                            erros.append(f"Item {idx}: informe o nome do produto novo.")
+                        if not str(novo.get("categoria", "")).strip():
+                            erros.append(f"Item {idx}: selecione a categoria do produto novo.")
+                    elif item_cfg["acao"] == "Vincular a produto existente" and not item_cfg.get("produto_id"):
+                        erros.append(f"Item {idx}: selecione o produto existente.")
+
+                if erros:
+                    st.error("\n".join(erros))
+                else:
+                    for idx, item_cfg in enumerate(itens_confirmar, start=1):
+                        if item_cfg["acao"] == "Ignorar este item":
+                            continue
+
+                        produto_id_final = item_cfg.get("produto_id")
+                        if item_cfg["acao"] == "Cadastrar como produto novo":
+                            produto_id_final = EstoqueRepository.salvar_produto(item_cfg.get("novo_produto") or {})
+
+                        item = item_cfg["item_xml"]
+                        produto_conv = EstoqueRepository.buscar_produto(produto_id_final) or {}
+                        fator_conv = float(produto_conv.get("qtd_consumo_por_unidade_compra") or 1)
+                        quantidade_estoque, valor_unitario_estoque = _calcular_estoque_fracionado(
+                            item.get("quantidade"),
+                            item.get("valor_total"),
+                            fator_conv,
+                        )
+                        unidade_consumo_obs = produto_conv.get("unidade_consumo") or produto_conv.get("unidade") or ""
+
+                        EstoqueRepository.salvar_movimentacao({
+                            "produto_id": produto_id_final,
+                            "tipo_movimento": "Entrada",
+                            "data_movimento": nf_emissao,
+                            "quantidade": quantidade_estoque,
+                            "valor_unitario": valor_unitario_estoque,
+                            "valor_total": float(item.get("valor_total") or 0),
+                            "pessoa_id": pessoa_id_xml,
+                            "pessoa_nome": pessoa_nome_xml,
+                            "destino_tipo": item_cfg.get("destino_tipo"),
+                            "animal_sbb": item_cfg.get("animal_sbb"),
+                            "categoria_animal": item_cfg.get("categoria_animal"),
+                            "manejo": item_cfg.get("manejo"),
+                            "centro_custo": item_cfg.get("centro_custo"),
+                            "atividade": item_cfg.get("atividade"),
+                            "observacoes": (
+                                f"NF {nf_numero} série {nf_serie}. "
+                                f"Fornecedor: {fornecedor_nome_xml} {fornecedor_cnpj_xml}. "
+                                f"Valor NF: {_formatar_moeda(nf_valor)}. "
+                                f"Chave: {dados_nfe.get('chave', '')}. "
+                                f"Item NF: {item.get('descricao', '')}. "
+                                f"Compra na NF: {item.get('quantidade', 0)} {item.get('unidade', '')}; "
+                                f"entrada convertida: {quantidade_estoque:g} {unidade_consumo_obs}. "
+                                f"{obs_xml}"
+                            ),
+                        })
+                        processados += 1
+
+                    st.session_state.pop("estoque_xml_dados", None)
+                    st.session_state["estoque_mov_msg"] = f"✅ NF {nf_numero} importada com sucesso. {processados} item(ns) entraram no estoque com classificação e destino individuais."
+                    st.session_state["estoque_xml_form_version"] = versao_xml + 1
+                    st.rerun()
 
         st.markdown("### Produtos cadastrados")
         f1, f2, f3 = st.columns(3)
@@ -821,15 +1159,11 @@ def render_modulo_estoque():
                 st.rerun()
 
     with tab_mov:
-        st.markdown("### Nova movimentação de estoque")
+        st.markdown("### Nova movimentação sem nota fiscal")
         if st.session_state.get("estoque_mov_msg"):
             st.success(st.session_state.pop("estoque_mov_msg"))
-
-        produtos_op = _opcoes_produtos_estoque()
-        pessoas_op = _opcoes_pessoas_financeiro()
-        animais_op = _opcoes_animais_financeiro()
+        st.info("Use esta tela quando não houver nota fiscal. Se houver XML de NF-e, faça a importação em Insumos e Cadastros.")
         versao_mov = st.session_state.get("estoque_mov_form_version", 0)
-
         with st.form(f"form_estoque_mov_{versao_mov}"):
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -838,33 +1172,33 @@ def render_modulo_estoque():
                 tipo_mov = st.selectbox("Tipo de movimentação", EstoqueRepository.TIPOS_MOVIMENTO)
                 data_mov = st.text_input("Data do movimento", placeholder="DD/MM/AAAA")
             with c2:
-                quantidade = st.number_input("Quantidade", min_value=0.0, step=1.0)
-                valor_unitario = st.number_input("Valor unitário", min_value=0.0, step=1.0)
+                quantidade = st.number_input("Quantidade na unidade de consumo/controle", min_value=0.0, step=1.0)
+                valor_unitario = st.number_input("Valor unitário da unidade de consumo", min_value=0.0, step=1.0)
                 valor_total = quantidade * valor_unitario
-                st.write(f"**Valor total estimado:** R$ {valor_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                st.write(f"**Valor total estimado:** {_formatar_moeda(valor_total)}")
             with c3:
                 pessoa_rotulo = st.selectbox("Pessoa relacionada", list(pessoas_op.keys()))
                 pessoa_id, pessoa_nome = pessoas_op[pessoa_rotulo]
-                destino_tipo = st.selectbox("Destino / Aplicação", ["", "Animal específico", "Categoria", "Manejo", "Todos os Animais"])
+                centro_custo = st.selectbox("Centro de custo", [""] + FinanceiroRepository.CENTROS_CUSTO)
+                atividade = st.selectbox("Atividade", [""] + FinanceiroRepository.ATIVIDADES)
 
-            animal_sbb = categoria_animal = manejo = ""
-            if destino_tipo == "Animal específico":
-                animal_rotulo = st.selectbox("Animal", list(animais_op.keys()))
-                animal_sbb = animais_op.get(animal_rotulo, "")
-            elif destino_tipo == "Categoria":
-                categoria_animal = st.text_input("Categoria animal", placeholder="Ex: Égua Adulta")
-            elif destino_tipo == "Manejo":
-                manejo = st.text_input("Manejo", placeholder="Ex: Cabanha, Pastagem")
+            d1, d2 = st.columns(2)
+            with d1:
+                destino_tipo = st.selectbox("Destino / Aplicação", ["", "Animal específico", "Categoria", "Manejo", "Todos os Animais"])
+            with d2:
+                animal_sbb = categoria_animal = manejo = ""
+                animal_sbb, categoria_animal, manejo = _render_destino_estoque("manual", destino_tipo, animais_op)
 
             observacoes = st.text_area("Observações da movimentação")
             salvar_mov = st.form_submit_button("Salvar movimentação", type="primary", use_container_width=True)
             if salvar_mov:
+                erro_destino = _validar_destino_estoque(destino_tipo, animal_sbb, categoria_animal, manejo)
                 if not produto_id:
                     st.warning("Selecione um produto.")
                 elif quantidade <= 0:
                     st.warning("Informe quantidade maior que zero.")
-                elif destino_tipo == "Animal específico" and not animal_sbb:
-                    st.warning("Selecione o animal do destino.")
+                elif erro_destino:
+                    st.warning(erro_destino)
                 else:
                     mov_id = EstoqueRepository.salvar_movimentacao({
                         "produto_id": produto_id,
@@ -879,6 +1213,8 @@ def render_modulo_estoque():
                         "animal_sbb": animal_sbb,
                         "categoria_animal": categoria_animal,
                         "manejo": manejo,
+                        "centro_custo": centro_custo,
+                        "atividade": atividade,
                         "observacoes": observacoes,
                     })
                     st.session_state["estoque_mov_msg"] = f"✅ Movimentação #{mov_id} registrada com sucesso. O formulário foi limpo."
@@ -895,28 +1231,257 @@ def render_modulo_estoque():
         st.dataframe(df_mov, use_container_width=True, hide_index=True)
         if not df_mov.empty:
             mov_excluir = st.selectbox("Excluir movimentação", [""] + [str(x) for x in df_mov["id"].tolist()], key="estoque_excluir_mov")
-            if mov_excluir and st.button("Confirmar exclusão da movimentação"):
+            if mov_excluir and st.button("Confirmar exclusão da movimentação", type="secondary"):
                 EstoqueRepository.excluir_movimentacao(int(mov_excluir))
                 st.success("Movimentação excluída logicamente.")
                 st.rerun()
 
     with tab_saldos:
-        st.markdown("### Saldos e alertas")
+        st.markdown("### Saldos")
         saldos = EstoqueRepository.saldos()
         df_saldos = pd.DataFrame(saldos)
         if not df_saldos.empty:
             baixo = df_saldos[df_saldos["Saldo"] <= df_saldos["Estoque Mínimo"]]
-            st.metric("Produtos cadastrados", len(df_saldos))
-            st.metric("Produtos abaixo/igual ao mínimo", len(baixo))
-            st.dataframe(df_saldos, use_container_width=True, hide_index=True)
             if not baixo.empty:
-                st.warning("Existem produtos com saldo abaixo ou igual ao estoque mínimo.")
-                st.dataframe(baixo, use_container_width=True, hide_index=True)
+                st.warning(f"{len(baixo)} produto(s) estão no estoque mínimo ou abaixo.")
+            st.dataframe(df_saldos, use_container_width=True, hide_index=True)
         else:
-            st.info("Nenhum produto ativo cadastrado ainda.")
+            st.info("Nenhum saldo encontrado.")
 
 
-aba_cad, aba_fila, aba_animais, aba_pessoas, aba_financeiro, aba_estoque = st.tabs(["Cadastrar por SBB", "Fila de Extração", "Cadastro Completo", "Pessoas", "Financeiro", "Estoque"])
+
+def _animais_ativos_lista():
+    return listar_animais(incluir_inativos=False)
+
+
+def _animais_por_destino_sanidade(destino_tipo, animal_sbb="", animais_sbb=None, categoria_animal="", manejo=""):
+    animais = _animais_ativos_lista()
+    animais_sbb = animais_sbb or []
+    selecionados = []
+    for a in animais:
+        sbb = a.get("sbb")
+        if destino_tipo == "Animal específico" and sbb == animal_sbb:
+            selecionados.append(a)
+        elif destino_tipo == "Vários animais" and sbb in animais_sbb:
+            selecionados.append(a)
+        elif destino_tipo == "Categoria" and (a.get("categoria_idade") or "") == categoria_animal:
+            selecionados.append(a)
+        elif destino_tipo == "Manejo" and (a.get("manejo") or "") == manejo:
+            selecionados.append(a)
+        elif destino_tipo == "Todos os Animais":
+            selecionados.append(a)
+    return selecionados
+
+
+def render_modulo_sanidade():
+    st.subheader("Sanidade e Farmácia")
+    st.caption("Registro de vacinas, vermífugos, medicações e atendimentos veterinários, com baixa opcional do estoque, custo por animal/grupo e alerta de próxima dose.")
+
+    tab_novo, tab_eventos, tab_alertas = st.tabs(["Novo evento sanitário", "Histórico e relatórios", "Alertas de próximas doses"])
+    animais_op = _opcoes_animais_financeiro()
+    pessoas_op = _opcoes_pessoas_financeiro()
+    produtos_op = _opcoes_produtos_estoque()
+
+    with tab_novo:
+        if st.session_state.get("sanidade_msg"):
+            st.success(st.session_state.pop("sanidade_msg"))
+        versao = st.session_state.get("sanidade_form_version", 0)
+        with st.form(f"form_sanidade_{versao}"):
+            st.markdown("### Dados do evento")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                tipo_evento = st.selectbox("Tipo de evento *", SanidadeRepository.TIPOS)
+                data_evento = st.text_input("Data do evento *", placeholder="DD/MM/AAAA")
+                protocolo = st.selectbox("Protocolo", SanidadeRepository.PROTOCOLOS)
+            with c2:
+                produto_rotulo = st.selectbox("Produto do estoque", list(produtos_op.keys()))
+                produto_id = produtos_op.get(produto_rotulo)
+                produto_nome = produto_rotulo.split(" | ")[0] if produto_rotulo else ""
+                principio_ativo = st.text_input("Princípio ativo")
+                nome_comercial = st.text_input("Nome comercial", value=produto_nome)
+            with c3:
+                lote = st.text_input("Lote")
+                via_aplicacao = st.selectbox("Via de aplicação", SanidadeRepository.VIAS)
+                proxima_dose = st.text_input("Próxima dose / reforço", placeholder="DD/MM/AAAA")
+
+            st.markdown("### Animais atendidos")
+            d1, d2 = st.columns([1, 2])
+            with d1:
+                destino_tipo = st.selectbox("Aplicar para", ["", "Animal específico", "Vários animais", "Categoria", "Manejo", "Todos os Animais"])
+            with d2:
+                animal_sbb = ""; animais_sbb = []; categoria_animal = ""; manejo = ""
+                if destino_tipo == "Animal específico":
+                    animal_rotulo = st.selectbox("Animal", list(animais_op.keys()))
+                    animal_sbb = animais_op.get(animal_rotulo, "")
+                elif destino_tipo == "Vários animais":
+                    labels = [k for k in animais_op.keys() if k]
+                    escolhidos = st.multiselect("Animais", labels)
+                    animais_sbb = [animais_op[x] for x in escolhidos]
+                elif destino_tipo == "Categoria":
+                    categoria_animal = st.selectbox("Categoria animal", _opcoes_categorias_animais())
+                elif destino_tipo == "Manejo":
+                    manejo = st.selectbox("Manejo", _opcoes_manejos_animais())
+                elif destino_tipo == "Todos os Animais":
+                    st.info("O evento será aplicado a todos os animais ativos na cabanha.")
+
+            animais_sel = _animais_por_destino_sanidade(destino_tipo, animal_sbb, animais_sbb, categoria_animal, manejo)
+            if destino_tipo:
+                st.caption(f"Animais selecionados para o evento: {len(animais_sel)}")
+
+            st.markdown("### Quantidade, custo e responsável")
+            q1, q2, q3 = st.columns(3)
+            with q1:
+                quantidade_por_animal = st.number_input("Quantidade por animal", min_value=0.0, step=1.0)
+                unidade = st.selectbox("Unidade", [""] + EstoqueRepository.UNIDADES)
+                valor_unitario = st.number_input("Valor unitário do produto", min_value=0.0, step=1.0)
+            with q2:
+                pessoa_rotulo = st.selectbox("Veterinário / responsável", list(pessoas_op.keys()))
+                veterinario_pessoa_id, veterinario_nome = pessoas_op[pessoa_rotulo]
+                local_atendimento = st.text_input("Local")
+                motivo = st.text_input("Motivo")
+            with q3:
+                honorarios = st.number_input("Honorários", min_value=0.0, step=1.0)
+                outros_custos = st.number_input("Outros custos", min_value=0.0, step=1.0)
+                centro_custo = st.selectbox("Centro de custo", [""] + FinanceiroRepository.CENTROS_CUSTO)
+                atividade = st.selectbox("Atividade", [""] + FinanceiroRepository.ATIVIDADES)
+
+            quantidade_total = quantidade_por_animal * len(animais_sel)
+            valor_produtos = quantidade_total * valor_unitario
+            custo_total = valor_produtos + honorarios + outros_custos
+            st.info(f"Quantidade total: {quantidade_total:g} {unidade or ''} | Custo total estimado: {_formatar_moeda(custo_total)} | Custo médio por animal: {_formatar_moeda(custo_total / len(animais_sel) if animais_sel else 0)}")
+
+            gerar_baixa_estoque = st.checkbox("Gerar saída automática do estoque", value=bool(produto_id and quantidade_total > 0))
+            gerar_financeiro = st.checkbox("Gerar lançamento financeiro automaticamente", value=bool(custo_total > 0))
+            observacoes = st.text_area("Observações")
+            salvar = st.form_submit_button("Salvar evento sanitário", type="primary", use_container_width=True)
+
+            if salvar:
+                if not data_evento.strip():
+                    st.warning("Informe a data do evento.")
+                elif not destino_tipo:
+                    st.warning("Informe para quais animais este evento será aplicado.")
+                elif not animais_sel:
+                    st.warning("Nenhum animal foi selecionado para este evento.")
+                elif gerar_baixa_estoque and not produto_id:
+                    st.warning("Para gerar baixa de estoque, selecione um produto do estoque.")
+                else:
+                    animais_payload = []
+                    custo_rateado = custo_total / len(animais_sel) if animais_sel else 0
+                    for a in animais_sel:
+                        animais_payload.append({
+                            "animal_sbb": a.get("sbb"),
+                            "animal_nome": a.get("nome") or "",
+                            "quantidade": quantidade_por_animal,
+                            "custo_rateado": custo_rateado,
+                        })
+                    evento_id = SanidadeRepository.salvar_evento({
+                        "tipo_evento": tipo_evento,
+                        "data_evento": data_evento,
+                        "protocolo": protocolo,
+                        "principio_ativo": principio_ativo,
+                        "nome_comercial": nome_comercial,
+                        "lote": lote,
+                        "via_aplicacao": via_aplicacao,
+                        "produto_id": produto_id,
+                        "produto_nome": produto_nome or nome_comercial,
+                        "quantidade_total": quantidade_total,
+                        "unidade": unidade,
+                        "valor_produtos": valor_produtos,
+                        "veterinario_pessoa_id": veterinario_pessoa_id,
+                        "veterinario_nome": veterinario_nome,
+                        "local_atendimento": local_atendimento,
+                        "motivo": motivo,
+                        "honorarios": honorarios,
+                        "outros_custos": outros_custos,
+                        "custo_total": custo_total,
+                        "proxima_dose": proxima_dose,
+                        "centro_custo": centro_custo,
+                        "atividade": atividade,
+                        "gerar_financeiro": gerar_financeiro,
+                        "observacoes": observacoes,
+                    }, animais_payload)
+
+                    mov_id = None
+                    if gerar_baixa_estoque and produto_id and quantidade_total > 0:
+                        mov_id = EstoqueRepository.salvar_movimentacao({
+                            "produto_id": produto_id,
+                            "tipo_movimento": "Saída / Consumo",
+                            "data_movimento": data_evento,
+                            "quantidade": quantidade_total,
+                            "valor_unitario": valor_unitario,
+                            "valor_total": valor_produtos,
+                            "pessoa_id": veterinario_pessoa_id,
+                            "pessoa_nome": veterinario_nome,
+                            "destino_tipo": destino_tipo,
+                            "animal_sbb": animal_sbb,
+                            "categoria_animal": categoria_animal,
+                            "manejo": manejo,
+                            "centro_custo": centro_custo,
+                            "atividade": atividade,
+                            "observacoes": f"Baixa automática gerada pelo evento sanitário #{evento_id}. {tipo_evento}. {observacoes}",
+                        })
+
+                    lanc_id = None
+                    if gerar_financeiro and custo_total > 0:
+                        parcelas = [{"numero": 1, "vencimento": data_evento, "valor": custo_total, "status": "Aberta", "observacoes": f"Evento sanitário #{evento_id}"}]
+                        rateios = []
+                        for a in animais_payload:
+                            rateios.append({
+                                "criterio_rateio": "Animal específico",
+                                "animal_sbb": a["animal_sbb"],
+                                "categoria_animal": "",
+                                "manejo": "",
+                                "percentual": 100 / len(animais_payload),
+                                "valor_rateado": a["custo_rateado"],
+                                "observacoes": f"Rateio automático do evento sanitário #{evento_id}",
+                            })
+                        lanc_id = FinanceiroRepository.salvar_lancamento({
+                            "tipo": "Saída",
+                            "data_evento": data_evento,
+                            "data_emissao": data_evento,
+                            "competencia": data_evento[3:] if len(data_evento) == 10 else data_evento,
+                            "descricao": f"{tipo_evento} - {nome_comercial or principio_ativo or 'Evento sanitário'}",
+                            "pessoa_id": veterinario_pessoa_id,
+                            "pessoa_nome": veterinario_nome,
+                            "valor_total": custo_total,
+                            "forma_pagamento": "",
+                            "centro_custo": centro_custo or "Veterinário",
+                            "atividade": atividade or "Sanidade",
+                            "origem_modulo": "Sanidade",
+                            "observacoes": f"Gerado automaticamente pelo evento sanitário #{evento_id}. {observacoes}",
+                        }, parcelas, rateios)
+                    SanidadeRepository.atualizar_integracoes(evento_id, lancamento_financeiro_id=lanc_id, movimentacao_estoque_id=mov_id)
+                    st.session_state["sanidade_msg"] = f"✅ Evento sanitário #{evento_id} salvo com sucesso. Animais: {len(animais_sel)}. Estoque: {'sim' if mov_id else 'não'}. Financeiro: {'sim' if lanc_id else 'não'}."
+                    st.session_state["sanidade_form_version"] = versao + 1
+                    st.rerun()
+
+    with tab_eventos:
+        st.markdown("### Histórico sanitário")
+        f1, f2, f3, f4 = st.columns(4)
+        f_tipo = f1.selectbox("Tipo", [""] + SanidadeRepository.TIPOS, key="san_f_tipo")
+        f_protocolo = f2.selectbox("Protocolo", [""] + [p for p in SanidadeRepository.PROTOCOLOS if p], key="san_f_prot")
+        f_animal_rotulo = f3.selectbox("Animal", list(animais_op.keys()), key="san_f_animal")
+        f_busca = f4.text_input("Buscar", key="san_f_busca")
+        eventos = SanidadeRepository.listar_eventos({"tipo_evento": f_tipo, "protocolo": f_protocolo, "animal_sbb": animais_op.get(f_animal_rotulo, ""), "busca": f_busca})
+        df_eventos = pd.DataFrame(eventos)
+        st.dataframe(df_eventos, use_container_width=True, hide_index=True)
+        if not df_eventos.empty:
+            exc = st.selectbox("Excluir evento lançado por engano", [""] + [str(x) for x in df_eventos["id"].tolist()], key="san_exc")
+            if exc and st.button("Confirmar exclusão do evento sanitário", type="secondary"):
+                SanidadeRepository.excluir_evento(int(exc))
+                st.success("Evento sanitário excluído logicamente.")
+                st.rerun()
+
+    with tab_alertas:
+        st.markdown("### Próximas doses / reforços")
+        alertas = SanidadeRepository.alertas()
+        df_alertas = pd.DataFrame(alertas)
+        if df_alertas.empty:
+            st.info("Nenhum alerta de próxima dose cadastrado.")
+        else:
+            st.dataframe(df_alertas, use_container_width=True, hide_index=True)
+
+aba_cad, aba_fila, aba_animais, aba_pessoas, aba_financeiro, aba_estoque, aba_sanidade = st.tabs(["Cadastrar por SBB", "Fila de Extração", "Cadastro Completo", "Pessoas", "Financeiro", "Estoque", "Sanidade"])
 
 with aba_cad:
     st.subheader("Informar SBBs para cadastro")
@@ -1320,3 +1885,6 @@ with aba_financeiro:
 
 with aba_estoque:
     render_modulo_estoque()
+
+with aba_sanidade:
+    render_modulo_sanidade()

@@ -321,6 +321,14 @@ def init_db():
         init_financeiro_db()
     except NameError:
         pass
+    try:
+        init_estoque_db()
+    except NameError:
+        pass
+    try:
+        init_sanidade_db()
+    except NameError:
+        pass
 
 
 def inserir_fila(sbb: str):
@@ -1050,7 +1058,7 @@ CATEGORIAS_ESTOQUE_PADRAO = [
     "Outro",
 ]
 
-UNIDADES_ESTOQUE_PADRAO = ["kg", "g", "L", "mL", "un", "dose", "saco", "fardo", "palheta"]
+UNIDADES_ESTOQUE_PADRAO = ["kg", "g", "L", "mL", "un", "dose", "saco", "fardo", "palheta", "frasco", "ampola", "bisnaga"]
 
 TIPOS_MOV_ESTOQUE = ["Entrada", "Saída / Consumo", "Ajuste"]
 
@@ -1067,6 +1075,9 @@ def init_estoque_db():
         apresentacao TEXT,
         laboratorio_fabricante TEXT,
         unidade TEXT,
+        unidade_compra TEXT,
+        unidade_consumo TEXT,
+        qtd_consumo_por_unidade_compra REAL DEFAULT 1,
         estoque_minimo REAL DEFAULT 0,
         valor_unitario REAL DEFAULT 0,
         data_vencimento TEXT,
@@ -1092,6 +1103,8 @@ def init_estoque_db():
         animal_sbb TEXT,
         categoria_animal TEXT,
         manejo TEXT,
+        centro_custo TEXT,
+        atividade TEXT,
         observacoes TEXT,
         status_movimento TEXT DEFAULT 'Ativo',
         criado_em TEXT,
@@ -1099,6 +1112,21 @@ def init_estoque_db():
         FOREIGN KEY(produto_id) REFERENCES estoque_produtos(id)
     )
     """)
+
+    # Migração leve para bancos já criados em versões anteriores.
+    colunas_prod = [r[1] for r in cur.execute("PRAGMA table_info(estoque_produtos)").fetchall()]
+    if "unidade_compra" not in colunas_prod:
+        cur.execute("ALTER TABLE estoque_produtos ADD COLUMN unidade_compra TEXT")
+    if "unidade_consumo" not in colunas_prod:
+        cur.execute("ALTER TABLE estoque_produtos ADD COLUMN unidade_consumo TEXT")
+    if "qtd_consumo_por_unidade_compra" not in colunas_prod:
+        cur.execute("ALTER TABLE estoque_produtos ADD COLUMN qtd_consumo_por_unidade_compra REAL DEFAULT 1")
+
+    colunas = [r[1] for r in cur.execute("PRAGMA table_info(estoque_movimentacoes)").fetchall()]
+    if "centro_custo" not in colunas:
+        cur.execute("ALTER TABLE estoque_movimentacoes ADD COLUMN centro_custo TEXT")
+    if "atividade" not in colunas:
+        cur.execute("ALTER TABLE estoque_movimentacoes ADD COLUMN atividade TEXT")
 
     conn.commit()
     conn.close()
@@ -1115,7 +1143,10 @@ def salvar_produto_estoque(dados):
         dados.get("categoria") or "",
         dados.get("apresentacao") or "",
         dados.get("laboratorio_fabricante") or "",
-        dados.get("unidade") or "",
+        dados.get("unidade") or dados.get("unidade_consumo") or "",
+        dados.get("unidade_compra") or "",
+        dados.get("unidade_consumo") or dados.get("unidade") or "",
+        float(dados.get("qtd_consumo_por_unidade_compra") or 1),
         float(dados.get("estoque_minimo") or 0),
         float(dados.get("valor_unitario") or 0),
         dados.get("data_vencimento") or "",
@@ -1125,16 +1156,16 @@ def salvar_produto_estoque(dados):
     if produto_id:
         cur.execute("""
             UPDATE estoque_produtos
-            SET nome=?, categoria=?, apresentacao=?, laboratorio_fabricante=?, unidade=?, estoque_minimo=?,
-                valor_unitario=?, data_vencimento=?, observacoes=?, ativo=?, atualizado_em=?
+            SET nome=?, categoria=?, apresentacao=?, laboratorio_fabricante=?, unidade=?, unidade_compra=?, unidade_consumo=?,
+                qtd_consumo_por_unidade_compra=?, estoque_minimo=?, valor_unitario=?, data_vencimento=?, observacoes=?, ativo=?, atualizado_em=?
             WHERE id=?
         """, valores + (agora, produto_id))
     else:
         cur.execute("""
             INSERT INTO estoque_produtos (
-                nome, categoria, apresentacao, laboratorio_fabricante, unidade, estoque_minimo,
-                valor_unitario, data_vencimento, observacoes, ativo, criado_em, atualizado_em
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                nome, categoria, apresentacao, laboratorio_fabricante, unidade, unidade_compra, unidade_consumo,
+                qtd_consumo_por_unidade_compra, estoque_minimo, valor_unitario, data_vencimento, observacoes, ativo, criado_em, atualizado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, valores + (agora, agora))
         produto_id = cur.lastrowid
     conn.commit(); conn.close()
@@ -1154,8 +1185,11 @@ def listar_produtos_estoque(incluir_inativos=False, busca="", categoria=""):
     conn = get_conn()
     rows = conn.execute(f"""
         SELECT id, nome AS Produto, categoria AS Categoria, apresentacao AS Apresentação,
-               laboratorio_fabricante AS 'Laboratório/Fabricante', unidade AS Unidade,
-               estoque_minimo AS 'Estoque Mínimo', valor_unitario AS 'Valor Unitário',
+               laboratorio_fabricante AS 'Laboratório/Fabricante',
+               COALESCE(unidade_consumo, unidade, '') AS 'Unidade de Consumo',
+               COALESCE(unidade_compra, '') AS 'Unidade de Compra',
+               COALESCE(qtd_consumo_por_unidade_compra, 1) AS 'Qtd Consumo por Compra',
+               estoque_minimo AS 'Estoque Mínimo', valor_unitario AS 'Valor Unitário Consumo',
                data_vencimento AS Vencimento, ativo AS Ativo
         FROM estoque_produtos
         {sql_where}
@@ -1188,22 +1222,24 @@ def salvar_movimentacao_estoque(dados):
         int(dados.get("produto_id")), dados.get("tipo_movimento") or "Entrada", dados.get("data_movimento") or "",
         quantidade, valor_unitario, valor_total, dados.get("pessoa_id"), dados.get("pessoa_nome") or "",
         dados.get("destino_tipo") or "", dados.get("animal_sbb") or "", dados.get("categoria_animal") or "",
-        dados.get("manejo") or "", dados.get("observacoes") or "",
+        dados.get("manejo") or "", dados.get("centro_custo") or "", dados.get("atividade") or "",
+        dados.get("observacoes") or "",
     )
     if mov_id:
         cur.execute("""
             UPDATE estoque_movimentacoes
             SET produto_id=?, tipo_movimento=?, data_movimento=?, quantidade=?, valor_unitario=?, valor_total=?,
-                pessoa_id=?, pessoa_nome=?, destino_tipo=?, animal_sbb=?, categoria_animal=?, manejo=?, observacoes=?, atualizado_em=?
+                pessoa_id=?, pessoa_nome=?, destino_tipo=?, animal_sbb=?, categoria_animal=?, manejo=?,
+                centro_custo=?, atividade=?, observacoes=?, atualizado_em=?
             WHERE id=?
         """, valores + (agora, mov_id))
     else:
         cur.execute("""
             INSERT INTO estoque_movimentacoes (
                 produto_id, tipo_movimento, data_movimento, quantidade, valor_unitario, valor_total,
-                pessoa_id, pessoa_nome, destino_tipo, animal_sbb, categoria_animal, manejo, observacoes,
+                pessoa_id, pessoa_nome, destino_tipo, animal_sbb, categoria_animal, manejo, centro_custo, atividade, observacoes,
                 status_movimento, criado_em, atualizado_em
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ativo', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ativo', ?, ?)
         """, valores + (agora, agora))
         mov_id = cur.lastrowid
     conn.commit(); conn.close(); return mov_id
@@ -1224,10 +1260,11 @@ def listar_movimentacoes_estoque(filtros=None):
     conn = get_conn()
     rows = conn.execute(f"""
         SELECT m.id, m.data_movimento AS Data, m.tipo_movimento AS Movimento, p.nome AS Produto,
-               p.categoria AS Categoria, m.quantidade AS Quantidade, p.unidade AS Unidade,
+               p.categoria AS Categoria, m.quantidade AS Quantidade, COALESCE(p.unidade_consumo, p.unidade, '') AS Unidade,
                m.valor_unitario AS 'Valor Unitário', m.valor_total AS 'Valor Total',
                COALESCE(pe.nome_razao, m.pessoa_nome, '') AS Pessoa, m.destino_tipo AS Destino,
                m.animal_sbb AS Animal, m.categoria_animal AS 'Categoria Animal', m.manejo AS Manejo,
+               m.centro_custo AS 'Centro de Custo', m.atividade AS Atividade,
                m.observacoes AS Observações
         FROM estoque_movimentacoes m
         JOIN estoque_produtos p ON p.id = m.produto_id
@@ -1247,7 +1284,7 @@ def excluir_movimentacao_estoque(mov_id):
 def saldo_estoque_produtos():
     init_estoque_db(); conn = get_conn()
     rows = conn.execute("""
-        SELECT p.id, p.nome AS Produto, p.categoria AS Categoria, p.unidade AS Unidade,
+        SELECT p.id, p.nome AS Produto, p.categoria AS Categoria, COALESCE(p.unidade_consumo, p.unidade, '') AS Unidade,
                p.estoque_minimo AS 'Estoque Mínimo', p.data_vencimento AS Vencimento,
                COALESCE(SUM(CASE
                     WHEN m.status_movimento='Excluído' THEN 0
@@ -1266,5 +1303,196 @@ def saldo_estoque_produtos():
         WHERE p.ativo=1
         GROUP BY p.id
         ORDER BY p.nome
+    """).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+# ============================================================
+# SANIDADE E FARMÁCIA
+# ============================================================
+TIPOS_SANIDADE_PADRAO = [
+    "Vacina",
+    "Vermífugo",
+    "Medicação",
+    "Atendimento veterinário",
+    "Exame",
+    "Procedimento",
+    "Outro",
+]
+
+VIAS_APLICACAO_PADRAO = ["", "Oral", "Intramuscular", "Subcutânea", "Intravenosa", "Tópica", "Intranasal", "Outra"]
+
+PROTOCOLOS_SANIDADE_PADRAO = ["", "Geral", "Éguas de cria", "Potros", "Garanhões", "Animais em treinamento", "Animais de terceiros"]
+
+
+def init_sanidade_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sanidade_eventos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tipo_evento TEXT NOT NULL,
+        data_evento TEXT,
+        protocolo TEXT,
+        principio_ativo TEXT,
+        nome_comercial TEXT,
+        lote TEXT,
+        via_aplicacao TEXT,
+        produto_id INTEGER,
+        produto_nome TEXT,
+        quantidade_total REAL DEFAULT 0,
+        unidade TEXT,
+        valor_produtos REAL DEFAULT 0,
+        veterinario_pessoa_id INTEGER,
+        veterinario_nome TEXT,
+        local_atendimento TEXT,
+        motivo TEXT,
+        honorarios REAL DEFAULT 0,
+        outros_custos REAL DEFAULT 0,
+        custo_total REAL DEFAULT 0,
+        proxima_dose TEXT,
+        centro_custo TEXT,
+        atividade TEXT,
+        gerar_financeiro INTEGER DEFAULT 0,
+        lancamento_financeiro_id INTEGER,
+        movimentacao_estoque_id INTEGER,
+        observacoes TEXT,
+        status_evento TEXT DEFAULT 'Ativo',
+        criado_em TEXT,
+        atualizado_em TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sanidade_evento_animais (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        evento_id INTEGER NOT NULL,
+        animal_sbb TEXT NOT NULL,
+        animal_nome TEXT,
+        quantidade REAL DEFAULT 0,
+        custo_rateado REAL DEFAULT 0,
+        observacoes TEXT,
+        FOREIGN KEY(evento_id) REFERENCES sanidade_eventos(id)
+    )
+    """)
+    conn.commit(); conn.close()
+
+
+def salvar_evento_sanidade(dados, animais):
+    init_sanidade_db()
+    conn = get_conn(); cur = conn.cursor(); agora = now_br()
+    evento_id = dados.get("id")
+    animais = animais or []
+    qtd_animais = max(len(animais), 1)
+    custo_total = float(dados.get("custo_total") or 0)
+    valores = (
+        dados.get("tipo_evento") or "", dados.get("data_evento") or "", dados.get("protocolo") or "",
+        dados.get("principio_ativo") or "", dados.get("nome_comercial") or "", dados.get("lote") or "",
+        dados.get("via_aplicacao") or "", dados.get("produto_id"), dados.get("produto_nome") or "",
+        float(dados.get("quantidade_total") or 0), dados.get("unidade") or "", float(dados.get("valor_produtos") or 0),
+        dados.get("veterinario_pessoa_id"), dados.get("veterinario_nome") or "", dados.get("local_atendimento") or "",
+        dados.get("motivo") or "", float(dados.get("honorarios") or 0), float(dados.get("outros_custos") or 0),
+        custo_total, dados.get("proxima_dose") or "", dados.get("centro_custo") or "", dados.get("atividade") or "",
+        int(bool(dados.get("gerar_financeiro", 0))), dados.get("lancamento_financeiro_id"), dados.get("movimentacao_estoque_id"),
+        dados.get("observacoes") or "",
+    )
+    if evento_id:
+        cur.execute("""
+            UPDATE sanidade_eventos
+            SET tipo_evento=?, data_evento=?, protocolo=?, principio_ativo=?, nome_comercial=?, lote=?, via_aplicacao=?,
+                produto_id=?, produto_nome=?, quantidade_total=?, unidade=?, valor_produtos=?, veterinario_pessoa_id=?, veterinario_nome=?,
+                local_atendimento=?, motivo=?, honorarios=?, outros_custos=?, custo_total=?, proxima_dose=?, centro_custo=?, atividade=?,
+                gerar_financeiro=?, lancamento_financeiro_id=?, movimentacao_estoque_id=?, observacoes=?, atualizado_em=?
+            WHERE id=?
+        """, valores + (agora, evento_id))
+        cur.execute("DELETE FROM sanidade_evento_animais WHERE evento_id=?", (evento_id,))
+    else:
+        cur.execute("""
+            INSERT INTO sanidade_eventos (
+                tipo_evento, data_evento, protocolo, principio_ativo, nome_comercial, lote, via_aplicacao,
+                produto_id, produto_nome, quantidade_total, unidade, valor_produtos, veterinario_pessoa_id, veterinario_nome,
+                local_atendimento, motivo, honorarios, outros_custos, custo_total, proxima_dose, centro_custo, atividade,
+                gerar_financeiro, lancamento_financeiro_id, movimentacao_estoque_id, observacoes, status_evento, criado_em, atualizado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ativo', ?, ?)
+        """, valores + (agora, agora))
+        evento_id = cur.lastrowid
+    for a in animais:
+        cur.execute("""
+            INSERT INTO sanidade_evento_animais (evento_id, animal_sbb, animal_nome, quantidade, custo_rateado, observacoes)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            evento_id, a.get("animal_sbb") or "", a.get("animal_nome") or "",
+            float(a.get("quantidade") or 0), float(a.get("custo_rateado") if a.get("custo_rateado") is not None else (custo_total / qtd_animais)),
+            a.get("observacoes") or "",
+        ))
+    conn.commit(); conn.close(); return evento_id
+
+
+def atualizar_integracoes_sanidade(evento_id, lancamento_financeiro_id=None, movimentacao_estoque_id=None):
+    init_sanidade_db(); conn = get_conn()
+    conn.execute("""
+        UPDATE sanidade_eventos
+        SET lancamento_financeiro_id=COALESCE(?, lancamento_financeiro_id),
+            movimentacao_estoque_id=COALESCE(?, movimentacao_estoque_id),
+            atualizado_em=?
+        WHERE id=?
+    """, (lancamento_financeiro_id, movimentacao_estoque_id, now_br(), evento_id))
+    conn.commit(); conn.close(); return True
+
+
+def listar_eventos_sanidade(filtros=None):
+    init_sanidade_db(); filtros = filtros or {}
+    where = ["COALESCE(e.status_evento,'Ativo') <> 'Excluído'"]; params = []
+    if filtros.get("tipo_evento"):
+        where.append("e.tipo_evento=?"); params.append(filtros["tipo_evento"])
+    if filtros.get("animal_sbb"):
+        where.append("a.animal_sbb=?"); params.append(filtros["animal_sbb"])
+    if filtros.get("protocolo"):
+        where.append("e.protocolo=?"); params.append(filtros["protocolo"])
+    if filtros.get("busca"):
+        termo = f"%{str(filtros['busca']).lower()}%"
+        where.append("(LOWER(COALESCE(e.nome_comercial,'')) LIKE ? OR LOWER(COALESCE(e.principio_ativo,'')) LIKE ? OR LOWER(COALESCE(e.motivo,'')) LIKE ? OR LOWER(COALESCE(a.animal_nome,'')) LIKE ? OR LOWER(COALESCE(a.animal_sbb,'')) LIKE ?)")
+        params.extend([termo, termo, termo, termo, termo])
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT e.id, e.data_evento AS Data, e.tipo_evento AS Tipo, e.protocolo AS Protocolo,
+               e.nome_comercial AS Produto, e.principio_ativo AS 'Princípio Ativo', e.lote AS Lote,
+               e.via_aplicacao AS Via, e.veterinario_nome AS Veterinário,
+               GROUP_CONCAT(a.animal_nome || ' (' || a.animal_sbb || ')', ', ') AS Animais,
+               e.custo_total AS 'Custo Total', e.proxima_dose AS 'Próxima Dose',
+               e.centro_custo AS 'Centro de Custo', e.atividade AS Atividade, e.observacoes AS Observações
+        FROM sanidade_eventos e
+        LEFT JOIN sanidade_evento_animais a ON a.evento_id = e.id
+        WHERE {' AND '.join(where)}
+        GROUP BY e.id
+        ORDER BY e.id DESC
+    """, params).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+
+def buscar_evento_sanidade(evento_id):
+    init_sanidade_db(); conn = get_conn()
+    evento = conn.execute("SELECT * FROM sanidade_eventos WHERE id=?", (evento_id,)).fetchone()
+    animais = conn.execute("SELECT * FROM sanidade_evento_animais WHERE evento_id=?", (evento_id,)).fetchall()
+    conn.close()
+    return {"evento": dict(evento) if evento else None, "animais": [dict(a) for a in animais]}
+
+
+def excluir_evento_sanidade(evento_id):
+    init_sanidade_db(); conn = get_conn()
+    conn.execute("UPDATE sanidade_eventos SET status_evento='Excluído', atualizado_em=? WHERE id=?", (now_br(), evento_id))
+    conn.commit(); conn.close(); return True
+
+
+def alertas_sanidade(dias=30):
+    init_sanidade_db(); conn = get_conn()
+    rows = conn.execute("""
+        SELECT e.id, e.proxima_dose AS 'Próxima Dose', e.tipo_evento AS Tipo, e.nome_comercial AS Produto,
+               GROUP_CONCAT(a.animal_nome || ' (' || a.animal_sbb || ')', ', ') AS Animais
+        FROM sanidade_eventos e
+        LEFT JOIN sanidade_evento_animais a ON a.evento_id=e.id
+        WHERE COALESCE(e.status_evento,'Ativo') <> 'Excluído'
+          AND COALESCE(e.proxima_dose,'') <> ''
+        GROUP BY e.id
+        ORDER BY e.proxima_dose
     """).fetchall()
     conn.close(); return [dict(r) for r in rows]

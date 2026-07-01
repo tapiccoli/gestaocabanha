@@ -77,3 +77,54 @@ Arquivos principais desta versão:
 - Seleção de animal específico e vários animais corrigida.
 - Validação para impedir salvar rateio sem animal, categoria ou manejo quando obrigatório.
 - Edição de lançamento também passa a usar "Todos os Animais".
+
+## v0.5.1 - Entrada de estoque com ou sem nota fiscal
+
+- Na aba Estoque > Movimentações, o usuário escolhe se a entrada/saída possui nota fiscal.
+- Com nota fiscal: importa XML de NF-e, lê fornecedor, número, série, data de emissão, valor total e itens.
+- Cada item do XML pode ser vinculado a um produto existente, cadastrado como produto novo ou ignorado.
+- Sem nota fiscal: mantém o lançamento manual como antes.
+- A confirmação da NF gera movimentações de entrada para os itens confirmados.
+
+## v0.5.2 - Estoque / XML NF-e e padronização de custos
+
+- Importação de XML NF-e movida para a aba **Insumos e Cadastros**.
+- Dados da NF podem ser conferidos e alterados antes de gravar.
+- Centro de custo e atividade agora são selecionados por listas padronizadas.
+- Categoria animal e manejo deixaram de ser campos livres nas telas de rateio/destino.
+- Movimentações de estoque passaram a armazenar centro de custo e atividade.
+
+## v0.6 — Sanidade e Farmácia
+
+Incluído módulo de Sanidade e Farmácia com:
+
+- Registro de vacinas, vermífugos, medicações, exames, procedimentos e atendimentos veterinários.
+- Aplicação para animal específico, vários animais, categoria, manejo ou todos os animais.
+- Produto do estoque, princípio ativo, nome comercial, lote, via de aplicação e próxima dose.
+- Responsável/veterinário usando o cadastro de Pessoas.
+- Baixa automática opcional do estoque.
+- Lançamento financeiro automático opcional com rateio por animal.
+- Histórico sanitário com filtros.
+- Exclusão lógica de eventos lançados por engano.
+- Alertas de próximas doses/reforços.
+
+## v0.6.1 - Estoque fracionado por unidade de consumo
+
+Ajustes realizados:
+- Produtos agora têm unidade de compra e unidade de consumo/controle.
+- Produto pode informar quantas unidades de consumo existem em cada unidade comprada.
+  - Exemplo: 1 frasco = 50 mL.
+  - Exemplo: 1 saco = 40 kg.
+- Na importação XML da NF-e, o sistema converte automaticamente a quantidade comprada para quantidade real de estoque.
+- O custo unitário passa a ser calculado pela unidade de consumo.
+- Movimentações sem nota passam a informar quantidade na unidade de consumo/controle.
+
+## v0.6.2 - XML NF-e item a item
+
+A importação de XML da NF-e foi ajustada para tratar cada item da nota individualmente:
+
+- cada produto da NF pode ser vinculado ou cadastrado separadamente;
+- cada item possui seu próprio centro de custo;
+- cada item possui sua própria atividade;
+- cada item possui seu próprio destino/rateio: animal específico, categoria, manejo ou todos os animais;
+- a nota continua sendo o documento pai, mas o custo/estoque é classificado por item.
